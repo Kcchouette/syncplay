@@ -11,7 +11,7 @@ source: fix/mixed-vlc-mpv-desync
 
 **What was built** — VLC position estimator (rate EMA, freeze detection that never stalls the wire position, seek-jump reset), sample-confirmed seek landing with warn-only miss detection, client forced-correction gate (cooldown + growth + 2× escalation) on rewind/fast-forward, and greppable DEBUG instrumentation. Server min() unchanged. Critical review fixes: pause/unpause holds position without wall-time inflation; VLC EOF heuristic uses a raw-sample chain.
 
-**Verification** — `PYTHONPATH=. python3 -m unittest discover tests -v` → 17 tests OK. Independent first review REJECT (2 criticals) → both fixed → re-review APPROVE. Joint live repro with user still pending (`mixed-player-vlc-mpv-desync-repro.md`).
+**Verification** — `PYTHONPATH=. python3 -m unittest discover tests -v` → 21 tests OK. Independent first review REJECT (2 criticals) → both fixed → re-review APPROVE. Joint live repro on the user’s Cloudflare MKV: after adding title×604800 sanitization, VLC raw samples stay in media range, **0 forced corrections**, max \|diff\| ≈ 0.55s during playback (user confirmed “oui ça marche”).
 
 ## [S1] Problem
 
@@ -69,3 +69,4 @@ DEBUG_MODE greppable tags: `VLCpos …`, `syncdiff …`, `sync-correction-suppre
 - Independent reviews (arch/clean-code/risk) all APPROVE WITH CHANGES; freeze-must-not-stall-reported-position, defer auto seek-retry, cooldown in rewind/FF helpers.
 - Freeze-vs-seek ordering bug caught by unit tests: stalled time must not look like a large seek jump (`abs(dt_vlc - dt_wall)`).
 - First implementation review REJECT: (1) unpause could add pause wall-time via `position_at`; (2) EOF equality on wall-advancing `_position` was dead. Fixed with paused-aware re-anchor and raw-sample EOF chain; re-review APPROVE.
+- Live repro (user’s Cloudflare MKV, MPV+VLC): VLC `get_time()` returned title×604800+time (610582s vs 5782s) → seek loop (60 applied corrections). Fixed by `sanitize_vlc_title_offset` in Python + duration clamp in `syncplay.lua get_time()`. Post-fix: 0 corrections, max \|diff\| 0.55s. User: “oui ça marche”.

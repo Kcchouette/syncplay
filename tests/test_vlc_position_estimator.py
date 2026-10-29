@@ -1,7 +1,10 @@
 # coding: utf8
 import unittest
 
-from syncplay.players.vlcPositionEstimator import VlcPositionEstimator
+from syncplay.players.vlcPositionEstimator import (
+    VlcPositionEstimator,
+    sanitize_vlc_title_offset,
+)
 
 
 class VlcPositionEstimatorTests(unittest.TestCase):
@@ -94,6 +97,24 @@ class VlcPositionEstimatorTests(unittest.TestCase):
         est.observe(50.2, 250.0, paused=True)
         self.assertAlmostEqual(est.position_at(250.0), 50.2)
         self.assertAlmostEqual(est.reported_position_at(260.0, paused=True), 50.2)
+
+
+class SanitizeTitleOffsetTests(unittest.TestCase):
+    def test_strips_one_title_week(self):
+        # Live repro: VLC reported 610582.443 for a 5795s file
+        self.assertAlmostEqual(
+            sanitize_vlc_title_offset(610582.443, 5795.14), 5782.443, places=3)
+
+    def test_keeps_in_range_position(self):
+        self.assertEqual(sanitize_vlc_title_offset(100.0, 5795.14), 100.0)
+
+    def test_no_duration_returns_original(self):
+        self.assertEqual(sanitize_vlc_title_offset(610582.443, None), 610582.443)
+        self.assertEqual(sanitize_vlc_title_offset(610582.443, 0), 610582.443)
+
+    def test_unfixable_returns_original(self):
+        # Beyond duration after week strip still (tiny duration edge)
+        self.assertEqual(sanitize_vlc_title_offset(1000.0, 1.0), 1000.0)
 
 
 if __name__ == "__main__":

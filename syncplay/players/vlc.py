@@ -17,7 +17,7 @@ from twisted.protocols.basic import LineReceiver
 from syncplay import constants, utils
 from syncplay.messages import getMessage
 from syncplay.players.basePlayer import BasePlayer
-from syncplay.players.vlcPositionEstimator import VlcPositionEstimator
+from syncplay.players.vlcPositionEstimator import VlcPositionEstimator, sanitize_vlc_title_offset
 from syncplay.utils import isBSD, isLinux, isWindows, isMacOS
 
 class VLCProtocol(LineReceiver):
@@ -201,6 +201,13 @@ class VlcPlayer(BasePlayer):
             self._previousRawPosition = None
             self._previousPreviousRawPosition = None
 
+    def _sanitizeVlcPosition(self, position):
+        sanitized = sanitize_vlc_title_offset(position, self._duration)
+        if sanitized != position and constants.DEBUG_MODE:
+            self._client.ui.showDebugMessage(
+                "VLCpos title-offset sanitized {} -> {}".format(position, sanitized))
+        return sanitized
+
     def askForStatus(self):
         self._filechanged = False
         self._positionAsk.clear()
@@ -382,6 +389,7 @@ class VlcPlayer(BasePlayer):
             isRawSample = value != "no-input" and not self._filechanged
             if isRawSample:
                 newPosition = float(value.replace(",", "."))
+                newPosition = self._sanitizeVlcPosition(newPosition)
             else:
                 newPosition = self._client.getGlobalPosition()
             if isRawSample:

@@ -357,6 +357,9 @@ VLC_MIN_SAMPLE_GAP = 0.05
 VLC_SEEK_JUMP_THRESHOLD = 1.5
 VLC_SEEK_LANDING_TOLERANCE = 1.5
 VLC_SEEK_LANDING_VERIFY_TIMEOUT = 1.5
+# VLC Lua get_time() may add title×604800 (weeks); reject absurd samples
+VLC_TITLE_WEEK_SECONDS = 604800
+VLC_POSITION_OVER_DURATION_TOLERANCE = 5.0
 
 # Forced rewind/fast-forward dampening (seek-storm prevention)
 FORCED_CORRECTION_COOLDOWN = 2.0
