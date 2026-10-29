@@ -9,7 +9,7 @@ from syncplay.players.mpc import MPCHCAPIPlayer
 class MpcBePlayer(MPCHCAPIPlayer):
     @staticmethod
     def run(client, playerPath, filePath, args):
-        args.extend(['/open', '/new'])
+        args = list(args) + ['/open', '/new']
         mpc = MpcBePlayer(client)
         mpc._mpcApi.callbacks.onConnected = lambda: mpc.initPlayer(filePath if filePath else None)
         mpc._mpcApi.startMpc(MpcBePlayer.getExpandedPath(playerPath), args)

@@ -8,7 +8,10 @@ class MpvnetPlayer(MpvPlayer):
 
     @staticmethod
     def run(client, playerPath, filePath, args):
-            args.extend(constants.MPV_NET_EXTRA_ARGS)
+            args = list(args) + [
+                '--{0}={1}'.format(key, value)
+                for key, value in constants.MPV_NET_EXTRA_ARGS.items()
+            ]
             constants.MPV_NEW_VERSION = True
             constants.MPV_OSC_VISIBILITY_CHANGE_VERSION = True
             return MpvnetPlayer(client, MpvnetPlayer.getExpandedPath(playerPath), filePath, args)

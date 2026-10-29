@@ -50,7 +50,7 @@ class MementoPlayer(MpvPlayer):
 
     @staticmethod
     def getStartupArgs(userArgs):
-        args = constants.MPV_ARGS
+        args = dict(constants.MPV_ARGS)
         args["scripts"] = findResourcePath("syncplayintf.lua")
         if userArgs:
             for argToAdd in userArgs:
