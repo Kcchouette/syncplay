@@ -32,6 +32,7 @@ class MplayerPlayer(BasePlayer):
         self._paused = None
         self._position = 0.0
         self._duration = None
+        self._speed = None
         self._filename = None
         self._filepath = None
         self.quitReason = None
@@ -54,6 +55,7 @@ class MplayerPlayer(BasePlayer):
 
         self._positionAsk = threading.Event()
         self._pausedAsk = threading.Event()
+        self._speedAsk = threading.Event()
 
         self._preparePlayer()
 
@@ -112,6 +114,14 @@ class MplayerPlayer(BasePlayer):
 
     def setSpeed(self, value):
         self._setProperty('speed', "{:.2f}".format(value))
+
+    def getSpeed(self):
+        self._speedAsk.clear()
+        self._getProperty('speed')
+        if not self._speedAsk.wait(constants.SPEED_GET_TIMEOUT):
+            self._client.ui.showDebugMessage("Timeout getting speed from mplayer")
+            return None
+        return self._speed
 
     def _loadFile(self, filePath):
         self._listener.sendLine('loadfile {}'.format(self._quoteArg(filePath)))
@@ -231,6 +241,12 @@ class MplayerPlayer(BasePlayer):
         elif name == "filename":
             self._filename = value
             self._filenameAsk.set()
+        elif name == "speed":
+            try:
+                self._speed = float(value)
+            except ValueError:
+                self._speed = None
+            self._speedAsk.set()
         elif name == "exiting":
             if value != 'Quit':
                 if self.quitReason is None:
@@ -301,6 +317,7 @@ class MplayerPlayer(BasePlayer):
         self._pathAsk.set()
         self._positionAsk.set()
         self._pausedAsk.set()
+        self._speedAsk.set()
 
     def drop(self):
         self._listener.sendLine('quit')

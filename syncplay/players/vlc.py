@@ -131,6 +131,7 @@ class VlcPlayer(BasePlayer):
         self._previousPreviousPosition = -2
         self._previousPosition = -1
         self._position = 0
+        self._rate = None
         try:  # Hack to fix locale issue without importing locale library
             self.radixChar = "{:n}".format(1.5)[1:2]
             if self.radixChar == "" or self.radixChar == "1" or self.radixChar == "5":
@@ -223,6 +224,9 @@ class VlcPlayer(BasePlayer):
 
     def setSpeed(self, value):
         self._listener.sendLine("set-rate: {:.2n}".format(value))
+
+    def getSpeed(self):
+        return self._rate
 
     def setFeatures(self, featureList):
         pass
@@ -326,6 +330,12 @@ class VlcPlayer(BasePlayer):
                 self._client.ui.showDebugMessage("Treating 'playing' response as 'paused' due to VLC EOF bug")
                 self.setPaused(True)
             self._pausedAsk.set()
+        elif name == "rate":
+            if value != "no-input":
+                try:
+                    self._rate = float(value.replace(",", "."))
+                except (ValueError, TypeError):
+                    pass
         elif name == "position":
             newPosition = float(value.replace(",", ".")) if (value != "no-input" and not self._filechanged) else self._client.getGlobalPosition()
             if newPosition == self._previousPosition and newPosition != self._duration and self._paused is False:

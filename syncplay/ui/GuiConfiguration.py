@@ -671,6 +671,11 @@ class ConfigDialog(QtWidgets.QDialog):
                 widget.setValue(int(self.config[valueName]))
             except (KeyError, TypeError, ValueError):
                 pass
+        elif isinstance(widget, QDoubleSpinBox):
+            try:
+                widget.setValue(float(self.config[valueName]))
+            except (KeyError, TypeError, ValueError):
+                pass
 
     def saveValues(self, widget):
         valueName = str(widget.objectName())
@@ -694,6 +699,11 @@ class ConfigDialog(QtWidgets.QDialog):
         elif isinstance(widget, QLineEdit):
             self.config[valueName] = widget.text()
         elif isinstance(widget, QSpinBox):
+            try:
+                self.config[valueName] = widget.value()
+            except (KeyError, AttributeError):
+                pass
+        elif isinstance(widget, QDoubleSpinBox):
             try:
                 self.config[valueName] = widget.value()
             except (KeyError, AttributeError):
@@ -1096,6 +1106,12 @@ class ConfigDialog(QtWidgets.QDialog):
 
         self.slowdownCheckbox = QCheckBox(getMessage("slowondesync-label"))
         self.slowdownCheckbox.setObjectName("slowOnDesync")
+        self.speedLabel = QLabel(getMessage("speed-label"))
+        self.speedSpinBox = QDoubleSpinBox()
+        self.speedSpinBox.setObjectName("speed")
+        self.speedSpinBox.setRange(0.10, 4.00)
+        self.speedSpinBox.setSingleStep(0.01)
+        self.speedSpinBox.setDecimals(2)
         self.rewindCheckbox = QCheckBox(getMessage("rewindondesync-label"))
         self.rewindCheckbox.setObjectName("rewindOnDesync")
         self.fastforwardCheckbox = QCheckBox(getMessage("fastforwardondesync-label"))
@@ -1109,6 +1125,8 @@ class ConfigDialog(QtWidgets.QDialog):
 
         self.desyncSettingsLayout.addWidget(self.slowdownCheckbox, 0, 0, 1, 2, Qt.AlignLeft)
         self.desyncSettingsLayout.addWidget(self.rewindCheckbox, 1, 0, 1, 2, Qt.AlignLeft)
+        self.desyncSettingsLayout.addWidget(self.speedLabel, 2, 0, 1, 1, Qt.AlignLeft)
+        self.desyncSettingsLayout.addWidget(self.speedSpinBox, 2, 1, 1, 1, Qt.AlignLeft)
 
         self.desyncSettingsLayout.setAlignment(Qt.AlignLeft)
         self.desyncSettingsGroup.setLayout(self.desyncSettingsLayout)

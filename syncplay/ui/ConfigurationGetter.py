@@ -44,6 +44,7 @@ class ConfigurationGetter(object):
             "playerArgs": [],
             "playerClass": None,
             "slowdownThreshold": constants.DEFAULT_SLOWDOWN_KICKIN_THRESHOLD,
+            "speed": 1.0,
             "rewindThreshold": constants.DEFAULT_REWIND_THRESHOLD,
             "fastforwardThreshold": constants.DEFAULT_FASTFORWARD_THRESHOLD,
             "rewindOnDesync": True,
@@ -179,6 +180,7 @@ class ConfigurationGetter(object):
 
         self._numeric = [
             "slowdownThreshold",
+            "speed",
             "rewindThreshold",
             "fastforwardThreshold",
             "folderSearchFirstFileTimeout",
@@ -209,6 +211,7 @@ class ConfigurationGetter(object):
             "client_settings": [
                 "name", "room", "roomList", "playerPath",
                 "perPlayerArguments", "slowdownThreshold",
+                "speed",
                 "rewindThreshold", "fastforwardThreshold",
                 "folderSearchFirstFileTimeout", "folderSearchTimeout", "folderSearchDoubleCheckInterval", "folderSearchWarningThreshold",
                 "slowOnDesync", "rewindOnDesync",
@@ -541,6 +544,7 @@ class ConfigurationGetter(object):
         self._argparser.add_argument('--clear-gui-data', action='store_true', help=getMessage("clear-gui-data-argument"))
         self._argparser.add_argument('-v', '--version', action='store_true', help=getMessage("version-argument"))
         self._argparser.add_argument('--load-playlist-from-file', metavar="loadPlaylistFromFile", type=str, help=getMessage("load-playlist-from-file-argument"))
+        self._argparser.add_argument('--speed', metavar='speed', type=float, help=getMessage("speed-argument"))
 
         self._argparser.add_argument('_args', metavar='options', type=str, nargs='*', help=getMessage("args-argument"))
         args = self._argparser.parse_args()

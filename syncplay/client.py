@@ -147,6 +147,7 @@ class SyncplayClient(object):
         self._globalPaused = 0.0
         self._userOffset = 0.0
         self._speedChanged = False
+        self._speedBeforeSlowdown = None
         self.behindFirstDetected = None
         self.autoPlay = False
         self.autoPlayThreshold = None
@@ -182,10 +183,15 @@ class SyncplayClient(object):
             self._protocol.drop()
         self._protocol = None
 
+    def _applyConfiguredSpeed(self):
+        if self._player and self._player.speedSupported and self._config['speed'] != 1.0:
+            self._player.setSpeed(self._config['speed'])
+
     def initPlayer(self, player):
         self._player = player
         if not self._player.alertOSDSupported:
             constants.OSD_WARNING_MESSAGE_DURATION = constants.NO_ALERT_OSD_WARNING_DURATION
+        self._applyConfiguredSpeed()
         self.scheduleAskPlayer()
         self.__playerReady.callback(player)
 
@@ -431,6 +437,11 @@ class SyncplayClient(object):
         self.ui.showMessage(message, hideFromOSD)
         return madeChangeOnPlayer
 
+    def _baselineSpeedOrDefault(self):
+        if self._speedBeforeSlowdown is not None:
+            return self._speedBeforeSlowdown
+        return self._config['speed']
+
     def _slowDownToCoverTimeDifference(self, diff, setBy):
         hideFromOSD = not constants.SHOW_SLOWDOWN_OSD
         madeChangeOnPlayer = False
@@ -438,13 +449,15 @@ class SyncplayClient(object):
             if self.getUsername() == setBy:
                 self.ui.showDebugMessage("Caught attempt to slow down due to time difference with self")
             else:
-                self._player.setSpeed(constants.SLOWDOWN_RATE)
+                self._speedBeforeSlowdown = self._player.getSpeed()
+                self._player.setSpeed(self._baselineSpeedOrDefault() * constants.SLOWDOWN_RATE)
                 self._speedChanged = True
                 self.ui.showMessage(getMessage("slowdown-notification").format(setBy), hideFromOSD)
                 madeChangeOnPlayer = True
         elif self._speedChanged and diff < constants.SLOWDOWN_RESET_THRESHOLD:
-            self._player.setSpeed(1.00)
+            self._player.setSpeed(self._baselineSpeedOrDefault())
             self._speedChanged = False
+            self._speedBeforeSlowdown = None
             self.ui.showMessage(getMessage("revert-notification"), hideFromOSD)
             madeChangeOnPlayer = True
         return madeChangeOnPlayer
@@ -566,6 +579,7 @@ class SyncplayClient(object):
             filename = path
         if not path:
             return
+        self._applyConfiguredSpeed()
         try:
             size = os.path.getsize(path)
         except:

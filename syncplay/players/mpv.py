@@ -152,6 +152,19 @@ class MpvPlayer(BasePlayer):
     def setSpeed(self, value):
         self._setProperty('speed', "{:.2f}".format(value))
 
+    def getSpeed(self):
+        try:
+            listener = getattr(self, "_listener", None)
+            if listener is None or getattr(listener, "mpvpipe", None) is None:
+                return None
+            speed = listener.mpvpipe.command("get_property", "speed")
+            if speed is None:
+                return None
+            return float(speed)
+        except Exception as e:
+            self._client.ui.showDebugMessage("Could not get speed from mpv: {}".format(e))
+            return None
+
     def setPaused(self, value):
         if self._paused == value:
             self._client.ui.showDebugMessage("Not sending setPaused to mpv as state is already {}".format(value))

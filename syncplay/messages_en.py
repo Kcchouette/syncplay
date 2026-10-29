@@ -210,6 +210,8 @@ en = {
 
     "load-playlist-from-file-argument": "loads playlist from text file (one entry per line)",
 
+    "speed-argument": "playback speed multiplier (e.g. 1.21 for 1.21x; default 1.0)",
+
 
     # Client labels
     "config-window-title": "Syncplay configuration",
@@ -239,6 +241,7 @@ en = {
     "checkforupdatesautomatically-label": "Check for Syncplay updates automatically",
     "autosavejoinstolist-label": "Add rooms you join to the room list",
     "slowondesync-label": "Slow down on minor desync (not supported on MPC-HC/BE)",
+    "speed-label": "Playback speed:",
     "rewindondesync-label": "Rewind on major desync (recommended)",
     "fastforwardondesync-label": "Fast-forward if lagging behind (recommended)",
     "dontslowdownwithme-label": "Never slow down or rewind others (experimental)",
@@ -443,6 +446,7 @@ en = {
     "checkforupdatesautomatically-tooltip": "Regularly check with the Syncplay website to see whether a new version of Syncplay is available.",
     "autosavejoinstolist-tooltip": "When you join a room in a server, automatically remember the room name in the list of rooms to join.",
     "slowondesync-tooltip": "Reduce playback rate temporarily when needed to bring you back in sync with other viewers. Not supported on MPC-HC/BE.",
+    "speed-tooltip": "Playback speed multiplier applied by Syncplay (e.g. 1.21 for 1.21x). Left at 1.0, Syncplay lets the player arguments decide. When Syncplay temporarily slows you down to fix a desync, it restores this speed (or the speed the player was actually at) rather than resetting to 1.0. Not supported on MPC-HC/BE.",
     "dontslowdownwithme-tooltip": "Means others do not get slowed down or rewinded if your playback is lagging. Useful for room operators.",
     "pauseonleave-tooltip": "Pause playback if you get disconnected or someone leaves from your room.",
     "readyatstart-tooltip": "Set yourself as 'ready' at start (otherwise you are set as 'not ready' until you change your readiness state)",

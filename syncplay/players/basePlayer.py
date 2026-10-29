@@ -57,6 +57,16 @@ class BasePlayer(object):
         raise NotImplementedError()
 
     '''
+    Current playback speed.
+
+    Optional capability: only called when speedSupported is True.
+
+    @return: float current playback speed, or None if unknown/unavailable
+    '''
+    def getSpeed(self):
+        return None
+
+    '''
     @type filePath: string
     '''
     def openFile(self, filePath, resetPosition=False):
