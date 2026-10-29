@@ -184,6 +184,8 @@ class SyncplayClient(object):
         self._protocol = None
 
     def _applyConfiguredSpeed(self):
+        if self._speedChanged:
+            return  # Syncplay owns the speed until the desync revert fires
         if self._player and self._player.speedSupported and self._config['speed'] != 1.0:
             self._player.setSpeed(self._config['speed'])
 

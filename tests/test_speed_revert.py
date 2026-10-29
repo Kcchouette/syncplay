@@ -153,6 +153,14 @@ class ApplyConfiguredSpeedTests(unittest.TestCase):
         client._applyConfiguredSpeed()
         self.assertEqual(client._player.setSpeed_calls, [])
 
+    def test_never_applies_while_slowdown_active(self):
+        # A file reload mid-desync must not cancel the in-flight slowdown
+        # (the revert will restore the baseline afterwards).
+        client = self._client(1.21, speed_supported=True)
+        client._speedChanged = True
+        client._applyConfiguredSpeed()
+        self.assertEqual(client._player.setSpeed_calls, [])
+
 
 class MplayerGetSpeedTests(unittest.TestCase):
     """mplayer getSpeed(): ANS_speed parsing and bounded timeout."""
