@@ -3,6 +3,7 @@ import os
 from syncplay import constants
 
 from syncplay.players.mpv import MpvPlayer
+from syncplay.players.mpv_status import build_mpv_args
 from syncplay.utils import findResourcePath, playerPathExists
 
 
@@ -50,22 +51,6 @@ class MementoPlayer(MpvPlayer):
 
     @staticmethod
     def getStartupArgs(userArgs):
-        args = dict(constants.MPV_ARGS)
-        args["scripts"] = findResourcePath("syncplayintf.lua")
-        if userArgs:
-            for argToAdd in userArgs:
-                if argToAdd.startswith("--"):
-                    argToAdd = argToAdd[2:]
-                elif argToAdd.startswith("-"):
-                    argToAdd = argToAdd[1:]
-                if argToAdd.strip() == "":
-                    continue
-                if "=" in argToAdd:
-                    (argName, argValue) = argToAdd.split("=", 1)
-                    if argValue[0] == '"' and argValue[-1] == '"':
-                        argValue = argValue[1:-1]
-                else:
-                    argName = argToAdd
-                    argValue = ""
-                args[argName] = argValue
-        return args
+        return build_mpv_args(
+            constants.MPV_ARGS, "scripts", findResourcePath("syncplayintf.lua"), userArgs
+        )

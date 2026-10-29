@@ -10,6 +10,7 @@ import threading
 from syncplay import constants
 from syncplay.messages import getMessage
 from syncplay.players.basePlayer import BasePlayer
+from syncplay.players.mpv_status import build_mpv_args
 from syncplay.utils import getRuntimeDir, isURL, findResourcePath
 from syncplay.utils import isWindows, isASCII
 from syncplay.utils import playerPathExists
@@ -53,25 +54,9 @@ class MpvPlayer(BasePlayer):
 
     @staticmethod
     def getStartupArgs(userArgs):
-        args = dict(constants.MPV_ARGS)
-        args["script"] = findResourcePath("syncplayintf.lua")
-        if userArgs:
-            for argToAdd in userArgs:
-                if argToAdd.startswith('--'):
-                    argToAdd = argToAdd[2:]
-                elif argToAdd.startswith('-'):
-                    argToAdd = argToAdd[1:]
-                if argToAdd.strip() == "":
-                    continue
-                if "=" in argToAdd:
-                    (argName, argValue) = argToAdd.split("=", 1)
-                    if argValue[0] == '"' and argValue[-1] == '"':
-                        argValue = argValue[1:-1]
-                else:
-                    argName = argToAdd
-                    argValue = ""
-                args[argName] = argValue
-        return args
+        return build_mpv_args(
+            constants.MPV_ARGS, "script", findResourcePath("syncplayintf.lua"), userArgs
+        )
 
     @staticmethod
     def getDefaultPlayerPathsList():
