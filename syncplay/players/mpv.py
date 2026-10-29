@@ -10,7 +10,14 @@ import threading
 from syncplay import constants
 from syncplay.messages import getMessage
 from syncplay.players.basePlayer import BasePlayer
-from syncplay.players.mpv_status import build_mpv_args
+from syncplay.players.mpv_status import (
+    EVENT_FILE_LOADED,
+    EVENT_START_FILE,
+    OBSERVED_PROPERTIES,
+    MpvStatusCache,
+    Signal,
+    build_mpv_args,
+)
 from syncplay.utils import getRuntimeDir, isURL, findResourcePath
 from syncplay.utils import isWindows, isASCII
 from syncplay.utils import playerPathExists
@@ -23,7 +30,6 @@ class MpvPlayer(BasePlayer):
     OSD_QUERY = 'show_text'
     RE_ANSWER = re.compile(constants.MPLAYER_ANSWER_REGEX)
     lastResetTime = None
-    lastMPVPositionUpdate = None
     alertOSDSupported = True
     chatOSDSupported = True
     speedSupported = True
@@ -136,101 +142,126 @@ class MpvPlayer(BasePlayer):
         self._setProperty('speed', "{:.2f}".format(value))
 
     def setPaused(self, value):
-        if self._paused == value:
+        if self._cache.snapshot().paused == value:
             self._client.ui.showDebugMessage("Not sending setPaused to mpv as state is already {}".format(value))
             return
         pauseValue = "yes" if value else "no"
         self._setProperty("pause", pauseValue)
-        self._paused = value
+        # Command path: store unconditionally; the observer-driven gate does
+        # not apply here (the property observer is authoritative for its own
+        # samples — this value only bridges until the next change arrives).
+        self._cache.force_pause(value)
         if value == False:
-            self.lastMPVPositionUpdate = time.time()
-
-    def _getFilename(self):
-        self._getProperty('filename')
-
-    def _getLength(self):
-        self._getProperty('length')
-
-    def _getFilepath(self):
-        self._getProperty('path')
-
-    def _getProperty(self, property_):
-        floatProperties = ['time-pos']
-        if property_ in floatProperties:
-            propertyID = "={}".format(property_)
-        elif property_ == 'length':
-            propertyID = '=duration:${=length:0}'
-        else:
-            propertyID = property_
-        self._listener.sendLine(["print_text", '"ANS_{}=${{{}}}"'.format(property_, propertyID)])
-
-    def getCalculatedPosition(self):
-        if self._recentlyReset():
-            return 0
-
-        if self.fileLoaded == False:
-            self._client.ui.showDebugMessage(
-                "File not loaded so using GlobalPosition for getCalculatedPosition({})".format(
-                    self._client.getGlobalPosition()))
-            return self._client.getGlobalPosition()
-
-        if self.lastMPVPositionUpdate is None:
-            self._client.ui.showDebugMessage(
-                "MPV not updated position so using GlobalPosition for getCalculatedPosition ({})".format(
-                    self._client.getGlobalPosition()))
-            return self._client.getGlobalPosition()
-
-        if self._recentlyReset():
-            self._client.ui.showDebugMessage(
-                "Recently reset so using self.position for getCalculatedPosition ({})".format(
-                    self._position))
-            return self._position
-
-        diff = time.time() - self.lastMPVPositionUpdate
-
-        if diff > constants.MPV_UNRESPONSIVE_THRESHOLD:
-            self.reactor.callFromThread(
-                self._client.ui.showErrorMessage, getMessage("mpv-unresponsive-error").format(int(diff)), True)
-            self.drop()
-        if diff > constants.PLAYER_ASK_DELAY and not self._paused:
-            self._client.ui.showDebugMessage(
-                "mpv did not response in time, so assuming position is {} ({}+{})".format(
-                    self._position + diff, self._position, diff))
-            return self._position + diff
-        else:
-            return self._position
+            self._cache.stamp_position()
 
     def eofDetected(self):
         self._client.eofReportedByPlayer()
 
-    def _storePosition(self, value):
-        if value is None:
-            self._client.ui.showDebugMessage("NONE TYPE POSITION!")
-            return
-        self.lastMPVPositionUpdate = time.time()
-        if self._recentlyReset():
-            self._client.ui.showDebugMessage("Recently reset, so storing position as 0")
-            self._position = 0
-        elif self._fileIsLoaded() or (value < constants.MPV_NEWFILE_IGNORE_TIME and self._fileIsLoaded(ignoreDelay=True)):
-            old_position = float(self._position)
-            self._position = max(value, 0)
-            #self._client.ui.showDebugMessage("Position changed from {} to {}".format(old_position, self._position))
-        else:
-            self._client.ui.showDebugMessage(
-                "No file loaded so storing position {} as GlobalPosition ({})".format(value, self._client.getGlobalPosition()))
-            self._position = self._client.getGlobalPosition()
+    # ------------------------------------------------------------------
+    # JSON-IPC observers: event-driven status (replaces log scraping of
+    # print-text ANS_* / term-playing-msg markers).
+    # ------------------------------------------------------------------
 
-    def _storePauseState(self, value):
-        if value is None:
-            self._client.ui.showDebugMessage("NONE TYPE PAUSE STATE!")
-            return
-        if self._fileIsLoaded():
-            self._paused = value
-            #self._client.ui.showDebugMessage("PAUSE STATE STORED AS {}".format(self._paused))
-        else:
-            self._paused = self._client.getGlobalPaused()
-            #self._client.ui.showDebugMessage("STORING GLOBAL PAUSED AS FILE IS NOT LOADED")
+    def _wireObservers(self, pipe):
+        """Bind property/event observers on a freshly created mpv pipe.
 
+        Called from the listener constructor: issuing observe_property
+        commands here is safe (the pipe is fully connected) and must never
+        happen from inside an EventHandler callback.
+        """
+        for prop in OBSERVED_PROPERTIES:
+            pipe.bind_property_observer(prop, self._onMpvProperty)
+        for event in (EVENT_START_FILE, EVENT_FILE_LOADED):
+            pipe.bind_event(event, self._onMpvEvent)
+
+    def _onMpvProperty(self, name, data):
+        """Runs on the vendor lib's EventHandler thread.
+
+        The cache is updated here; the reactor is only touched for EOF —
+        never per time-pos tick, which would flood it.
+ """
+        if name in ("time-pos", "pause"):
+            signals = self._cache.on_property(
+                name, data,
+                recently_reset=self._recentlyReset(),
+                global_position=self._client.getGlobalPosition(),
+                global_paused=self._client.getGlobalPaused(),
+            )
+        else:
+            signals = self._cache.on_property(name, data)
+        for signal in signals:
+            if signal is Signal.EOF:
+                self.reactor.callFromThread(self.eofDetected)
+
+    def _onMpvEvent(self, data):
+        """Runs on the vendor lib's EventHandler thread."""
+        for signal in self._cache.on_event(data.get("event")):
+            if signal is Signal.FILE_LOAD_START:
+                # Flipped synchronously on this thread (like the old
+                # <SyncplayUpdateFile> marker) so the send queue cannot flush
+                # a mid-transition command before the reactor wakes up.
+                self._client.ui.showDebugMessage("Not ready to send due to start-file")
+                self._listener.setReadyToSend(False)
+            elif signal is Signal.FILE_LOAD_DONE:
+                threading.Thread(
+                    target=self._resolveFileLoadFields,
+                    name="MPV FileLoad", daemon=True,
+                ).start()
+
+    def _resolveFileLoadFields(self):
+        """Worker thread: fill fields the property observers may have raced.
+
+        Bounded per-field waits keep a hung mpv from stalling the adapter for
+        the vendor lib's 120 s command timeout; neither the reactor nor the
+        EventHandler thread is ever blocked here.
+
+        ``pause``/``time-pos`` are re-read on purpose: observers only fire on
+        *changes*, so the values mpv held right before/at load (e.g. the
+        initial ``pause=yes``) would otherwise be lost to the pre-load gate
+        and never refresh — which both desynced pause and starved the
+        position stamp.
+        """
+        snap = self._cache.snapshot()
+        cached = {"filename": snap.filename, "duration": snap.duration, "path": snap.path}
+        for prop in ("filename", "duration", "path"):
+            if cached[prop] is None:
+                value = self._queryProperty(prop, timeout=2.0)
+                if value is not None:
+                    self._cache.on_property(prop, value)
+        pause_value = self._queryProperty("pause", timeout=2.0)
+        if pause_value is not None:
+            # Direct read of mpv reality — bypasses the file-loaded gate.
+            self._cache.force_pause(bool(pause_value))
+        position_value = self._queryProperty("time-pos", timeout=2.0)
+        if position_value is not None:
+            self._cache.force_position(float(position_value), stamp=True)
+        self.reactor.callFromThread(self._finalizeFileLoad)
+
+    def _queryProperty(self, name, timeout=2.0):
+        pipe = self._listener.mpvpipe
+        result = {}
+        done = threading.Event()
+
+        def query():
+            try:
+                result["value"] = pipe.command("get_property", name)
+            except Exception as e:
+                result["error"] = e
+            finally:
+                done.set()
+
+        threading.Thread(target=query, name="MPV get_property", daemon=True).start()
+        done.wait(timeout)
+        return result.get("value")
+
+    def _finalizeFileLoad(self):
+        """Reactor thread: run the file-update hook (IINA overrides it),
+        then re-open the send gate — same order as the old
+        </SyncplayUpdateFile> marker path (the gate flips even when IINA
+        skips the placeholder file)."""
+        self._onFileUpdate()
+        self._listener.setReadyToSend(True)
+        self._client.ui.showDebugMessage("Ready to send due to file load")
 
     def lineReceived(self, line):
         if line:
@@ -239,93 +270,48 @@ class MpvPlayer(BasePlayer):
             line = line.replace("[term-msg] ", "")  # -v workaround
             line = line.replace("   cplayer: ", "")  # --msg-module workaround
             line = line.replace("  term-msg: ", "")
-        if (
-            "Failed to get value of property" in line or
-            "=(unavailable)" in line or
-            line == "ANS_filename=" or
-            line == "ANS_length=" or
-            line == "ANS_path="
-        ):
-            if "filename" in line:
-                self._getFilename()
-            elif "length" in line:
-                self._getLength()
-            elif "path" in line:
-                self._getFilepath()
-            return
         match = self.RE_ANSWER.match(line)
-        if not match:
-            self._handleUnknownLine(line)
+        if match:
+            name, value = [m for m in match.groups() if m]
+            if name.lower() == "exiting":
+                # Kept on purpose: the mpv `quit` event carries no reason
+                # string, so abnormal exits are only visible in this log line.
+                if value != 'Quit':
+                    if self.quitReason is None:
+                        self.quitReason = getMessage("media-player-error").format(value)
+                    self.reactor.callFromThread(self._client.ui.showErrorMessage, self.quitReason, True)
+                self.drop()
+            # Other ANS_* lines have no senders anymore (status now comes
+            # from property observers) — ignore them.
             return
-
-        name, value = [m for m in match.groups() if m]
-        name = name.lower()
-
-        if name == self.POSITION_QUERY:
-            self._storePosition(float(value))
-            self._positionAsk.set()
-        elif name == "pause":
-            self._storePauseState(bool(value == 'yes'))
-            self._pausedAsk.set()
-        elif name == "length":
-            try:
-                self._duration = float(value)
-            except:
-                self._duration = 0
-            self._durationAsk.set()
-        elif name == "path":
-            self._filepath = value
-            self._pathAsk.set()
-        elif name == "filename":
-            self._filename = value
-            self._filenameAsk.set()
-        elif name == "exiting":
-            if value != 'Quit':
-                if self.quitReason is None:
-                    self.quitReason = getMessage("media-player-error").format(value)
-                self.reactor.callFromThread(self._client.ui.showErrorMessage, self.quitReason, True)
-            self.drop()
+        self._handleUnknownLine(line)
 
     def askForStatus(self):
-        self._positionAsk.clear()
-        self._pausedAsk.clear()
         if not self._listener.isReadyForSend:
             self._client.ui.showDebugMessage("mpv not ready for update")
             return
 
-        self._getPausedAndPosition()
-        self._positionAsk.wait(constants.MPV_LOCK_WAIT_TIME)
-        self._pausedAsk.wait(constants.MPV_LOCK_WAIT_TIME)
-        self._client.updatePlayerStatus(
-            self._paused if self.fileLoaded else self._client.getGlobalPaused(), self.getCalculatedPosition())
+        snap = self._cache.snapshot()
+        position, unresponsive = self._cache.calculated_position(
+            self._client.getGlobalPosition(), self._recentlyReset())
+        if unresponsive and snap.last_position_time is not None:
+            diff = time.time() - snap.last_position_time
+            self.reactor.callFromThread(
+                self._client.ui.showErrorMessage,
+                getMessage("mpv-unresponsive-error").format(int(diff)), True)
+            self.drop()
+        if snap.file_loaded and snap.paused is not None:
+            paused = snap.paused
+        else:
+            paused = self._client.getGlobalPaused()
+        self._client.updatePlayerStatus(paused, position)
 
     def drop(self):
         try:
             self._listener.sendLine(['quit'])
         except AttributeError as e:
             self._client.ui.showDebugMessage("Could not send quit message: {}".format(str(e)))
-        self._takeLocksDown()
         self.reactor.callFromThread(self._client.stop, False)
-
-    def _takeLocksDown(self):
-        try:
-            self._durationAsk.set()
-            self._filenameAsk.set()
-            self._pathAsk.set()
-            self._positionAsk.set()
-            self._pausedAsk.set()
-        except:
-            pass
-
-
-    def _getPausedAndPosition(self):
-        self._listener.sendLine(["script-message-to", "syncplayintf", "get_paused_and_position"])
-
-    def _getPaused(self):
-        self._getProperty('pause')
-
-    def _getPosition(self):
-        self._getProperty(self.POSITION_QUERY)
 
     def _sanitizeText(self, text):
         text = text.replace("\r", "")
@@ -353,12 +339,8 @@ class MpvPlayer(BasePlayer):
         self.setPaused(True)
         self.reactor.callLater(0, self._client.initPlayer, self)
 
-    def _clearFileLoaded(self):
-        self.fileLoaded = False
-        self.lastLoadedTime = None
-
     def _loadFile(self, filePath):
-        self._clearFileLoaded()
+        self._cache.clear_file()
         self._listener.sendLine(['loadfile', filePath], notReadyAfterThis=True)
 
     def setFeatures(self, featureList):
@@ -369,12 +351,12 @@ class MpvPlayer(BasePlayer):
             self._client.ui.showDebugMessage(
                 "Did not seek as recently reset and {} below 'do not reset position' threshold".format(value))
             return
-        self._position = max(value, 0)
+        self._cache.force_position(value)
         self._client.ui.showDebugMessage(
-            "Setting position to {}...".format(self._position))
+            "Setting position to {}...".format(self._cache.snapshot().position))
         self._setProperty(self.POSITION_QUERY, "{}".format(value))
         time.sleep(0.03)
-        self.lastMPVPositionUpdate = time.time()
+        self._cache.stamp_position()
 
     def openFile(self, filePath, resetPosition=False):
         self._client.ui.showDebugMessage("openFile, resetPosition=={}".format(resetPosition))
@@ -384,7 +366,7 @@ class MpvPlayer(BasePlayer):
                 self._client.ui.showDebugMessage("Setting additional lastResetTime due to stream")
                 self.lastResetTime += constants.STREAM_ADDITIONAL_IGNORE_TIME
         self._loadFile(filePath)
-        if self._paused != self._client.getGlobalPaused():
+        if self._cache.snapshot().paused != self._client.getGlobalPaused():
             self._client.ui.showDebugMessage("Want to set paused to {}".format(self._client.getGlobalPaused()))
         else:
             self._client.ui.showDebugMessage("Don't want to set paused to {}".format(self._client.getGlobalPaused()))
@@ -392,7 +374,9 @@ class MpvPlayer(BasePlayer):
             self._client.ui.showDebugMessage("OpenFile setting position to global position: {}".format(self._client.getGlobalPosition()))
             self.setPosition(self._client.getGlobalPosition())
         else:
-            self._storePosition(0)
+            self._cache.record_position(
+                0.0, recently_reset=self._recentlyReset(),
+                global_position=self._client.getGlobalPosition())
         # TO TRY: self._listener.setReadyToSend(False)
 
     def _sendMpvOptions(self):
@@ -417,37 +401,15 @@ class MpvPlayer(BasePlayer):
             line = line.replace(constants.MPV_INPUT_BACKSLASH_SUBSTITUTE_CHARACTER, "\\")
             self._listener.sendChat(line[6:-7])
 
-        if "<eof>" in line:
-            self.eofDetected()
-
-        if "<paused=" in line and ", pos=" in line:
-            update_string = line.replace(">", "<").replace("=", "<").replace(", ", "<").split("<")
-            paused_update = update_string[2]
-            position_update = update_string[4]
-            if paused_update == "nil":
-                self._storePauseState(float(self._client.getGlobalPaused()))
-            else:
-                self._storePauseState(bool(paused_update == 'true'))
-            self._pausedAsk.set()
-            if position_update == "nil":
-                self._storePosition(float(self._client.getGlobalPosition()))
-            else:
-                self._storePosition(float(position_update))
-            self._positionAsk.set()
-            #self._client.ui.showDebugMessage("{} = {} / {}".format(update_string, paused_update, position_update))
-
         if "<get_syncplayintf_options>" in line:
             self._sendMpvOptions()
 
-        if line == "<SyncplayUpdateFile>" or "Playing:" in line:
-            self._client.ui.showDebugMessage("Not ready to send due to <SyncplayUpdateFile>")
+        if "Playing:" in line:
+            # mpv's own early gate (parity with the old marker branch): the
+            # file is switching — hold outbound commands and drop file state.
+            self._client.ui.showDebugMessage("Not ready to send due to Playing:")
             self._listener.setReadyToSend(False)
-            self._clearFileLoaded()
-
-        elif line == "</SyncplayUpdateFile>":
-            self._onFileUpdate()
-            self._listener.setReadyToSend(True)
-            self._client.ui.showDebugMessage("Ready to send due to </SyncplayUpdateFile>")
+            self._cache.clear_file()
 
         elif "Failed" in line or "failed" in line or "No video or audio streams selected" in line or "error" in line:
             self._client.ui.showDebugMessage("Not ready to send due to error")
@@ -475,26 +437,18 @@ class MpvPlayer(BasePlayer):
 
     def _onFileUpdate(self):
         self._client.ui.showDebugMessage("File update")
-        self.fileLoaded = True
-        self.lastLoadedTime = time.time()
-        self.reactor.callFromThread(self._client.updateFile, self._filename, self._duration, self._filepath)
+        snap = self._cache.snapshot()
+        self._cache.mark_file_loaded()
+        # Streams/slow demuxers may have no duration yet — normalise to the
+        # 0.0 the old term-playing-msg `${=length:0}` expansion always gave.
+        duration = snap.duration if snap.duration is not None else 0.0
+        self.reactor.callFromThread(self._client.updateFile, snap.filename, duration, snap.path)
         if not (self._recentlyReset()):
             self._client.ui.showDebugMessage("onFileUpdate setting position to global position: {}".format(self._client.getGlobalPosition()))
             self.reactor.callFromThread(self.setPosition, self._client.getGlobalPosition())
-        if self._paused != self._client.getGlobalPaused():
-            self._client.ui.showDebugMessage("onFileUpdate setting position to global paused: {}".format(self._client.getGlobalPaused()))
-            self.reactor.callFromThread(self._client.getGlobalPaused)
-
-    def _fileIsLoaded(self, ignoreDelay=False):
-        if ignoreDelay:
-            self._client.ui.showDebugMessage("Ignoring _fileIsLoaded MPV_NEWFILE delay")
-            return bool(self.fileLoaded)
-
-        return (
-            self.fileLoaded and self.lastLoadedTime is not None and
-            time.time() > (self.lastLoadedTime + constants.MPV_NEWFILE_IGNORE_TIME)
-        )
-
+        if snap.paused != self._client.getGlobalPaused():
+            self._client.ui.showDebugMessage("onFileUpdate setting paused to global paused: {}".format(self._client.getGlobalPaused()))
+            self.reactor.callFromThread(self.setPaused, self._client.getGlobalPaused())
 
     def __init__(self, client, playerPath, filePath, args):
         from twisted.internet import reactor
@@ -506,14 +460,10 @@ class MpvPlayer(BasePlayer):
         self._create_listener(playerPath, filePath, args)
 
     def _set_defaults(self):
-        self._paused = None
-        self._position = 0.0
-        self._duration = None
-        self._filename = None
-        self._filepath = None
+        # Sole owner of status state (gates, stamps, file-loaded): the cache
+        # is written from the EventHandler thread and read from the reactor.
+        self._cache = MpvStatusCache()
         self.quitReason = None
-        self.lastLoadedTime = None
-        self.fileLoaded = False
         self.delayedFilePath = None
 
     def _create_listener(self, playerPath, filePath, args):
@@ -530,24 +480,7 @@ class MpvPlayer(BasePlayer):
         self._listener.daemon = True
         self._listener.start()
 
-        self._durationAsk = threading.Event()
-        self._filenameAsk = threading.Event()
-        self._pathAsk = threading.Event()
-
-        self._positionAsk = threading.Event()
-        self._pausedAsk = threading.Event()
-
         self._preparePlayer()
-
-    def _fileUpdateClearEvents(self):
-        self._durationAsk.clear()
-        self._filenameAsk.clear()
-        self._pathAsk.clear()
-
-    def _fileUpdateWaitEvents(self):
-        self._durationAsk.wait()
-        self._filenameAsk.wait()
-        self._pathAsk.wait()
 
     def mpv_log_handler(self, level, prefix, text):
         self.lineReceived(text)
@@ -598,6 +531,10 @@ class MpvPlayer(BasePlayer):
                 self.__playerController.reactor.callFromThread(self.__playerController._client.ui.showErrorMessage, self.quitReason, True)
                 self.__playerController.drop()
             self.__process = self.mpvpipe
+            # Pipe is fully connected here — safe place to issue the blocking
+            # observe_property commands (never do this from an EventHandler
+            # callback).
+            self.__playerController._wireObservers(self.mpvpipe)
             #self.mpvpipe.show_text("HELLO WORLD!", 1000)
             threading.Thread.__init__(self, name="MPV Listener")
 
@@ -714,7 +651,6 @@ class MpvPlayer(BasePlayer):
                 self.mpvpipe.terminate()
             except: #When mpv is already closed
                 pass
-            self.__playerController._takeLocksDown()
             self.__playerController.reactor.callFromThread(self.__playerController._client.stop, False)
 
         def actuallySendLine(self, line):

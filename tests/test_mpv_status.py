@@ -163,6 +163,14 @@ class PositionGatingTests(unittest.TestCase):
         self.cache.on_property("pause", True, global_paused=False)
         self.assertFalse(self.cache.snapshot().paused)
 
+    def test_pause_fallback_normalized_to_strict_bool(self):
+        # The client's initial _globalPaused is the float 0.0; storing it
+        # raw would make setPaused(False)'s guard (0.0 == False) swallow the
+        # unpause command forever.
+        self.cache.on_property("pause", True, global_paused=0.0)
+        stored = self.cache.snapshot().paused
+        self.assertIs(stored, False)
+
     def test_pause_stored_once_loaded(self):
         self.cache.mark_file_loaded()
         self.clock.advance(2)
@@ -218,23 +226,40 @@ class CalculatedPositionTests(unittest.TestCase):
         self.clock.advance(0.3)
         position, unresponsive = self.cache.calculated_position(99.0, False)
         self.assertAlmostEqual(position, 10.0)
+        # A paused player going quiet is normal, not an unresponsive one.
         self.assertFalse(unresponsive)
 
-    def test_unresponsive_flag_beyond_threshold(self):
-        self._loaded_at(position=10.0, paused=True)
+    def test_unresponsive_flag_beyond_threshold_when_playing(self):
+        self._loaded_at(position=10.0, paused=False)
         self.clock.advance(constants.MPV_UNRESPONSIVE_THRESHOLD + 1)
         position, unresponsive = self.cache.calculated_position(99.0, False)
         self.assertTrue(unresponsive)
-        self.assertAlmostEqual(position, 10.0)
+        self.assertAlmostEqual(position, 10.0 + constants.MPV_UNRESPONSIVE_THRESHOLD + 1)
 
     def test_unresponsive_unpaused_still_extrapolates(self):
-        # Parity with the original: drop policy runs first, but the returned
-        # position still follows the dead-reckoning branch.
         self._loaded_at(position=10.0, paused=False)
         self.clock.advance(constants.MPV_UNRESPONSIVE_THRESHOLD + 5)
         position, unresponsive = self.cache.calculated_position(99.0, False)
         self.assertTrue(unresponsive)
         self.assertAlmostEqual(position, 10.0 + constants.MPV_UNRESPONSIVE_THRESHOLD + 5)
+
+    def test_eof_freezes_extrapolation(self):
+        # keep-open EOF: time-pos stops changing while mpv reports unpaused
+        # (or its pause change was lost) — position must not walk past the
+        # end, and the resting state must not count as unresponsive.
+        self._loaded_at(position=8.0, paused=False)
+        self.cache.on_property("eof-reached", True)
+        self.clock.advance(30.0)
+        position, unresponsive = self.cache.calculated_position(99.0, False)
+        self.assertAlmostEqual(position, 8.0)
+        self.assertFalse(unresponsive)
+
+    def test_extrapolation_capped_at_duration(self):
+        self._loaded_at(position=7.9, paused=False)
+        self.cache.on_property("duration", 8.023)
+        self.clock.advance(5.0)
+        position, _ = self.cache.calculated_position(99.0, False)
+        self.assertAlmostEqual(position, 8.023)
 
 
 class SnapshotConsistencyTests(unittest.TestCase):

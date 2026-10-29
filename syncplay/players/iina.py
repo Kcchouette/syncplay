@@ -82,7 +82,7 @@ class IinaPlayer(MpvPlayer):
 
     def _onFileUpdate(self):
         # do not show file info for our placeholder image in Syncplay UI
-        if self._filename == "iina-bkg.png":
+        if self._cache.snapshot().filename == "iina-bkg.png":
             return
         else:
             super()._onFileUpdate()

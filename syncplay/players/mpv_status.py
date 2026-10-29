@@ -156,9 +156,12 @@ class MpvStatusCache:
 
     def _store_pause_state(self, value: bool, global_paused: bool) -> None:
         if self._file_is_loaded():
-            self._paused = value
+            self._paused = bool(value)
         else:
-            self._paused = global_paused
+            # Normalise: the client's initial `_globalPaused` is the float
+            # 0.0, and `0.0 == False` would make setPaused(False)'s
+            # early-return guard swallow every unpause command.
+            self._paused = bool(global_paused)
 
     def _file_is_loaded(self) -> bool:
         return (
@@ -184,6 +187,33 @@ class MpvStatusCache:
             self._eof_reached = False
             self._file_loaded = False
             self._last_loaded_time = None
+
+    def record_position(self, value: float, recently_reset: bool,
+                        global_position: float) -> None:
+        """Gated write from adapter code (openFile's reset-to-zero path).
+
+        Same semantics as an observed ``time-pos`` sample: stamp, then gate.
+        """
+        with self._lock:
+            self._store_position(value, recently_reset, global_position)
+
+    def force_pause(self, value: bool) -> None:
+        """Direct write from ``setPaused`` — a command result, not an
+        observation, so it bypasses the file-loaded gate."""
+        with self._lock:
+            self._paused = bool(value)
+
+    def force_position(self, value: float, stamp: bool = False) -> None:
+        """Direct write from ``setPosition`` (command path, ungated)."""
+        with self._lock:
+            self._position = max(float(value), 0.0)
+            if stamp:
+                self._last_position_time = self._clock()
+
+    def stamp_position(self) -> None:
+        """Refresh the dead-reckoning stamp (after unpause / post-seek)."""
+        with self._lock:
+            self._last_position_time = self._clock()
 
     # ------------------------------------------------------------------- read
 
@@ -218,6 +248,8 @@ class MpvStatusCache:
             last_position_time = self._last_position_time
             file_loaded = self._file_loaded
             paused = self._paused
+            eof_reached = self._eof_reached
+            duration = self._duration
 
         if recently_reset:
             return 0.0, False
@@ -225,10 +257,21 @@ class MpvStatusCache:
             return global_position, False
         if last_position_time is None:
             return global_position, False
+        if paused:
+            return position, False
 
         diff = self._clock() - last_position_time
-        if diff > constants.PLAYER_ASK_DELAY and not paused:
-            position = position + diff
+        # At keep-open EOF mpv stops emitting time-pos changes: extrapolating
+        # a frozen tail forever would walk the position past the file end.
+        # A stale-but-eof tail is a normal resting state, not a dead player
+        # (IPC death is detected separately via the socket quit callback).
+        if eof_reached:
+            return position, False
+        if diff > constants.PLAYER_ASK_DELAY:
+            extrapolated = position + diff
+            if duration is not None:
+                extrapolated = min(extrapolated, duration)
+            return extrapolated, diff > constants.MPV_UNRESPONSIVE_THRESHOLD
         return position, diff > constants.MPV_UNRESPONSIVE_THRESHOLD
 
 
