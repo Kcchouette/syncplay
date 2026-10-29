@@ -173,6 +173,23 @@ class MpvPlayer(BasePlayer):
             pipe.bind_property_observer(prop, self._onMpvProperty)
         for event in (EVENT_START_FILE, EVENT_FILE_LOADED):
             pipe.bind_event(event, self._onMpvEvent)
+        pipe.bind_event("client-message", self._onClientMessage)
+
+    def _onClientMessage(self, data):
+        """Runs on the vendor lib's EventHandler thread.
+
+        Lua → Python transport for chat lines and the script-ready options
+        handshake (replaces the old print-text → log scraping).
+        """
+        args = data.get("args") or []
+        if not args:
+            return
+        if args[0] == "syncplay-chat" and len(args) >= 2:
+            self._listener.sendChat(args[1])
+        elif args[0] == "syncplay-intf-ready":
+            # Beats the setFeatures race when the script loads after launch
+            # (IINA's load-script).
+            self._sendMpvOptions()
 
     def _onMpvProperty(self, name, data):
         """Runs on the vendor lib's EventHandler thread.
@@ -397,13 +414,6 @@ class MpvPlayer(BasePlayer):
 
     def _handleUnknownLine(self, line):
         self.mpvErrorCheck(line)
-        if "<chat>" in line:
-            line = line.replace(constants.MPV_INPUT_BACKSLASH_SUBSTITUTE_CHARACTER, "\\")
-            self._listener.sendChat(line[6:-7])
-
-        if "<get_syncplayintf_options>" in line:
-            self._sendMpvOptions()
-
         if "Playing:" in line:
             # mpv's own early gate (parity with the old marker branch): the
             # file is switching — hold outbound commands and drop file state.

@@ -169,9 +169,8 @@ class WiringTests(unittest.TestCase):
         pipe = FakePipe()
         player._wireObservers(pipe)
         self.assertEqual(set(pipe.property_bindings), set(OBSERVED_PROPERTIES))
-        self.assertEqual(set(pipe.event_bindings), {EVENT_START_FILE, EVENT_FILE_LOADED})
-        # client-message is bound later (T4) with the chat routing handler.
-        self.assertNotIn("client-message", pipe.event_bindings)
+        self.assertEqual(set(pipe.event_bindings),
+                         {EVENT_START_FILE, EVENT_FILE_LOADED, "client-message"})
 
     def test_all_property_callbacks_route_to_on_mpv_property(self):
         player = make_player()
@@ -432,17 +431,58 @@ class LineReceivedTests(unittest.TestCase):
         self.assertFalse(player._listener.readyToSend)
         self.assertFalse(player._cache.snapshot().file_loaded)
 
-    def test_syncplayintf_options_ping_still_answered(self):
+    def test_legacy_chat_marker_line_is_ignored(self):
+        # The Lua script no longer prints these; stray log lines are inert.
+        player = make_player()
+        player.lineReceived("<chat>hello</chat>")
+        self.assertEqual(player._listener.chats, [])
+
+    def test_legacy_options_ping_marker_line_is_ignored(self):
+        # The handshake now travels as a client-message event (T4).
         player = make_player()
         player.lineReceived("<get_syncplayintf_options>")
-        self.assertTrue(any(
+        self.assertFalse(any(
             isinstance(line, list) and "set_syncplayintf_options" in line
             for line in player._listener.sent))
 
-    def test_chat_line_still_routed(self):
-        player = make_player()
-        player.lineReceived("<chat>hello</chat>")
-        self.assertEqual(player._listener.chats, ["hello"])
+
+class ClientMessageRoutingTests(unittest.TestCase):
+    """Lua → Python transport: syncplay-chat / syncplay-intf-ready."""
+
+    def setUp(self):
+        self.player = make_player()
+        self.pipe = FakePipe()
+        self.player._wireObservers(self.pipe)
+
+    def _fire(self, *args):
+        self.pipe.trigger_event("client-message", args=list(args))
+
+    def _sends_options(self):
+        return any(isinstance(line, list) and "set_syncplayintf_options" in line
+                   for line in self.player._listener.sent)
+
+    def test_chat_routed_verbatim_including_backslashes_and_quotes(self):
+        payload = 'C:\\path "quoted" <b>hi</b>'
+        self._fire("syncplay-chat", payload)
+        self.assertEqual(self.player._listener.chats, [payload])
+
+    def test_chat_without_payload_ignored(self):
+        self._fire("syncplay-chat")
+        self.assertEqual(self.player._listener.chats, [])
+
+    def test_script_ready_triggers_options_send(self):
+        self._fire("syncplay-intf-ready")
+        self.assertTrue(self._sends_options())
+
+    def test_unknown_message_prefix_ignored(self):
+        self._fire("something-else", "x")
+        self.assertEqual(self.player._listener.chats, [])
+        self.assertFalse(self._sends_options())
+
+    def test_empty_message_ignored(self):
+        self._fire()
+        self.assertEqual(self.player._listener.chats, [])
+        self.assertFalse(self._sends_options())
 
 
 class CommandBridgeTests(unittest.TestCase):

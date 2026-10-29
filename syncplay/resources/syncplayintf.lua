@@ -297,12 +297,8 @@ end
 
 chat_timer=mp.add_periodic_timer(TICK_INTERVAL, chat_update)
 
-mp.observe_property('eof-reached', 'bool', function(e)
-    if mp.get_property_native("eof-reached") == true then
-        mp.command('print-text "<eof>"')
-    end
-end)
-
+-- EOF is observed by Syncplay itself over JSON IPC (observe_property), not
+-- printed to the log.
 
 mp.register_script_message('chat', function(e)
     add_chat(e)
@@ -356,17 +352,8 @@ mp.register_script_message('set_syncplayintf_options', function(e)
     set_syncplayintf_options(e)
 end)
 
-function state_paused_and_position()
-    -- bob
-    local pause_status = tostring(mp.get_property_native("pause"))
-    local position_status = tostring(mp.get_property_native("time-pos"))
-    mp.command('print-text "<paused='..pause_status..', pos='..position_status..'>"')
-    -- mp.command('print-text "<paused>true</paused><position>7.6</position>"')
-end
-
-mp.register_script_message('get_paused_and_position', function()
-    state_paused_and_position()
-end)
+-- Status (pause/time-pos) is read by Syncplay over JSON IPC property
+-- observation, not via script-message polling.
 
 -- Default options
 local utils = require 'mp.utils'
@@ -842,9 +829,10 @@ function handle_enter()
         return
     end
     key_hints_enabled = false
-    line = string.gsub(line,"\\", "\\\\")
-    line = string.gsub(line,"\"", "\\\"")
-    mp.command('print-text "<chat>'..line..'</chat>"')
+    -- script-message → JSON IPC client-message: arguments travel as JSON
+    -- strings, so no backslash/quote escaping round-trip is needed (the old
+    -- log-scraping path required gsubs the Python side undid).
+    mp.commandv("script-message", "syncplay-chat", line)
     clear()
 end
 
@@ -1042,7 +1030,10 @@ mp.register_script_message('type', function(text)
 end)
 
 local syncplayintfSet = false
-mp.command('print-text "<get_syncplayintf_options>"')
+-- Ask Syncplay (over JSON IPC client-message) for the chat/OSD options as
+-- soon as the script is ready — beats a race with setFeatures when the
+-- script is loaded after launch (e.g. IINA's load-script).
+mp.commandv("script-message", "syncplay-intf-ready")
 
 function readyMpvAfterSettingsKnown()
     if syncplayintfSet == false then
@@ -1065,7 +1056,6 @@ function readyMpvAfterSettingsKnown()
 end
 
 function set_syncplayintf_options(input)
-    --mp.command('print-text "<chat>...'..input..'</chat>"')
     for option, value in string.gmatch(input, "([^ ,=]+)=([^,]+)") do
         local valueType = type(opts[option])
         if valueType == "number" then
@@ -1078,7 +1068,6 @@ function set_syncplayintf_options(input)
             end
         end
         opts[option] = value
-        --mp.command('print-text "<chat>'..option.."="..tostring(value).." - "..valueType..'</chat>"')
     end
     chat_format = get_output_style()
     readyMpvAfterSettingsKnown()
