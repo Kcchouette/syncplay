@@ -42,6 +42,7 @@ from syncplay.constants import PRIVACY_SENDHASHED_MODE, PRIVACY_DONTSEND_MODE, \
     PRIVACY_HIDDENFILENAME
 from syncplay.messages import getMissingStrings, getMessage, isNoOSDMessage
 from syncplay.protocols import SyncClientProtocol
+from syncplay.syncPolicy import ForcedCorrectionGate
 from syncplay.watched import WatchedManager
 from syncplay.utils import isMacOS
 class SyncClientFactory(ClientFactory):
@@ -101,6 +102,7 @@ class SyncplayClient(object):
         self.lastRewindTime = None
         self.lastUpdatedFileTime = None
         self.lastAdvanceTime = None
+        self._forcedCorrectionGate = ForcedCorrectionGate()
         self.fileOpenBeforeChangingPlaylistIndex = None
         self.waitingToLoadNewfile = False
         self.waitingToLoadNewfileSince = None
@@ -383,8 +385,18 @@ class SyncplayClient(object):
         if self.getUsername() == setBy:
             self.ui.showDebugMessage("Caught attempt to rewind due to time difference with self")
         else:
+            absDiff = abs(self.getPlayerPosition() - position)
+            threshold = self._config['rewindThreshold']
+            if self._forcedCorrectionGate.should_suppress(time.time(), absDiff, threshold):
+                self.ui.showDebugMessage(
+                    "sync-correction-suppressed reason=cooldown type=rewind setBy={} diff={:.2f}".format(
+                        setBy, absDiff))
+                return False
             hideFromOSD = not constants.SHOW_SAME_ROOM_OSD
             self.setPosition(position)
+            self._forcedCorrectionGate.note_forced(time.time(), absDiff)
+            self.ui.showDebugMessage(
+                "sync-correction-applied type=rewind setBy={} diff={:.2f}".format(setBy, absDiff))
             self.ui.showMessage(getMessage("rewind-notification").format(setBy), hideFromOSD)
             madeChangeOnPlayer = True
         return madeChangeOnPlayer
@@ -394,14 +406,25 @@ class SyncplayClient(object):
         if self.getUsername() == setBy:
             self.ui.showDebugMessage("Caught attempt to fastforward due to time difference with self")
         else:
+            absDiff = abs(self.getPlayerPosition() - position)
+            threshold = self._config['fastforwardThreshold']
+            if self._forcedCorrectionGate.should_suppress(time.time(), absDiff, threshold):
+                self.ui.showDebugMessage(
+                    "sync-correction-suppressed reason=cooldown type=ff setBy={} diff={:.2f}".format(
+                        setBy, absDiff))
+                return False
             hideFromOSD = not constants.SHOW_SAME_ROOM_OSD
             self.setPosition(position + constants.FASTFORWARD_EXTRA_TIME)
+            self._forcedCorrectionGate.note_forced(time.time(), absDiff)
+            self.ui.showDebugMessage(
+                "sync-correction-applied type=ff setBy={} diff={:.2f}".format(setBy, absDiff))
             self.ui.showMessage(getMessage("fastforward-notification").format(setBy), hideFromOSD)
             madeChangeOnPlayer = True
         return madeChangeOnPlayer
 
     def _serverUnpaused(self, setBy):
         hideFromOSD = not constants.SHOW_SAME_ROOM_OSD
+        self._forcedCorrectionGate.clear()
         self._player.setPaused(False)
         madeChangeOnPlayer = True
         self.ui.showMessage(getMessage("unpause-notification").format(setBy), hideFromOSD)
@@ -421,6 +444,7 @@ class SyncplayClient(object):
 
     def _serverSeeked(self, position, setBy):
         hideFromOSD = not constants.SHOW_SAME_ROOM_OSD
+        self._forcedCorrectionGate.clear()
         if self.getUsername() != setBy:
             self.playerPositionBeforeLastSeek = self.getPlayerPosition()
             self.setPosition(position)
@@ -449,10 +473,14 @@ class SyncplayClient(object):
             madeChangeOnPlayer = True
         return madeChangeOnPlayer
 
-    def _changePlayerStateAccordingToGlobalState(self, position, paused, doSeek, setBy):
+    def _changePlayerStateAccordingToGlobalState(self, position, paused, doSeek, setBy, messageAge=0):
         madeChangeOnPlayer = False
         pauseChanged = paused != self.getGlobalPaused() or paused != self.getPlayerPaused()
         diff = self.getPlayerPosition() - position
+        if constants.DEBUG_MODE and abs(diff) > 0.5:
+            self.ui.showDebugMessage(
+                "syncdiff player={:.2f} global={:.2f} diff={:.2f} setBy={} messageAge={:.3f} paused={}".format(
+                    self.getPlayerPosition(), position, diff, setBy, messageAge, paused))
         if self._lastGlobalUpdate is None:
             madeChangeOnPlayer = self._initPlayerState(position, paused)
         self._globalPaused = paused
@@ -495,7 +523,7 @@ class SyncplayClient(object):
         if not paused:
             position += messageAge
         if self._player:
-            madeChangeOnPlayer = self._changePlayerStateAccordingToGlobalState(position, paused, doSeek, setBy)
+            madeChangeOnPlayer = self._changePlayerStateAccordingToGlobalState(position, paused, doSeek, setBy, messageAge)
         if madeChangeOnPlayer:
             self.askPlayer()
         self._executePlaystateHooks(position, paused, doSeek, setBy, messageAge)

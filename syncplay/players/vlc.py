@@ -17,6 +17,7 @@ from twisted.protocols.basic import LineReceiver
 from syncplay import constants, utils
 from syncplay.messages import getMessage
 from syncplay.players.basePlayer import BasePlayer
+from syncplay.players.vlcPositionEstimator import VlcPositionEstimator
 from syncplay.utils import isBSD, isLinux, isWindows, isMacOS
 
 class VLCProtocol(LineReceiver):
@@ -131,6 +132,14 @@ class VlcPlayer(BasePlayer):
         self._previousPreviousPosition = -2
         self._previousPosition = -1
         self._position = 0
+        self._lastRawPosition = None
+        self._previousRawPosition = None
+        self._previousPreviousRawPosition = None
+        self._positionEstimator = VlcPositionEstimator()
+        self._estimatorLock = threading.Lock()
+        self._pendingSeekTarget = None
+        self._pendingSeekIssuedAt = None
+        self._pendingSeekWarned = False
         try:  # Hack to fix locale issue without importing locale library
             self.radixChar = "{:n}".format(1.5)[1:2]
             if self.radixChar == "" or self.radixChar == "1" or self.radixChar == "5":
@@ -184,6 +193,13 @@ class VlcPlayer(BasePlayer):
         self.reactor.callFromThread(self._client.updateFile, *args)
         self.setPaused(self._client.getGlobalPaused())
         self.setPosition(self._client.getGlobalPosition())
+        with self._estimatorLock:
+            if self._positionEstimator.has_sample():
+                self._positionEstimator.reset(
+                    self._client.getGlobalPosition(), time.time())
+            self._lastRawPosition = None
+            self._previousRawPosition = None
+            self._previousPreviousRawPosition = None
 
     def askForStatus(self):
         self._filechanged = False
@@ -199,7 +215,22 @@ class VlcPlayer(BasePlayer):
     def getCalculatedPosition(self):
         if self._lastVLCPositionUpdate is None:
             return self._client.getGlobalPosition()
-        diff = time.time() - self._lastVLCPositionUpdate
+        now = time.time()
+        with self._estimatorLock:
+            if self._positionEstimator.has_sample():
+                reported = self._positionEstimator.reported_position_at(now, paused=bool(self._paused))
+                self._position = reported
+                if constants.DEBUG_MODE:
+                    self._client.ui.showDebugMessage(
+                        "VLCpos reported={} frozen={} rate={:.3f}".format(
+                            reported, self._positionEstimator.is_frozen(), self._positionEstimator.rate()))
+                diff = now - self._lastVLCPositionUpdate
+                if diff > constants.VLC_LATENCY_ERROR_THRESHOLD and not self._paused:
+                    if not self.shownVLCLatencyError or constants.DEBUG_MODE:
+                        self._client.ui.showErrorMessage(getMessage("media-player-latency-warning").format(int(diff)))
+                        self.shownVLCLatencyError = True
+                return reported
+        diff = now - self._lastVLCPositionUpdate
         if diff > constants.PLAYER_ASK_DELAY and not self._paused:
             self._client.ui.showDebugMessage("VLC did not response in time, so assuming position is {} ({}+{})".format(
                 self._position + diff, self._position, diff))
@@ -228,13 +259,28 @@ class VlcPlayer(BasePlayer):
         pass
 
     def setPosition(self, value):
-        self._lastVLCPositionUpdate = time.time()
+        now = time.time()
+        self._lastVLCPositionUpdate = now
+        self._pendingSeekTarget = float(value)
+        self._pendingSeekIssuedAt = now
+        self._pendingSeekWarned = False
+        # Anchor is intentionally not moved to the target; wait for a VLC sample.
         self._listener.sendLine("set-position: {}".format(value).replace(".", self.radixChar))
 
     def setPaused(self, value):
         self._paused = value
-        if not value:
-            self._lastVLCPositionUpdate = time.time()
+        now = time.time()
+        self._lastVLCPositionUpdate = now
+        with self._estimatorLock:
+            if self._positionEstimator.has_sample():
+                if value:
+                    # Capture the live advancing position at the pause instant.
+                    held = self._positionEstimator.reported_position_at(now, paused=False)
+                else:
+                    # Resume from the held anchor; do not add pause wall-time.
+                    held = self._positionEstimator.reported_position_at(now, paused=True)
+                self._positionEstimator.reset(held, now)
+                self._position = held
         self._listener.sendLine('set-playstate: {}'.format("paused" if value else "playing"))
 
     def getMRL(self, fileURL):
@@ -305,6 +351,8 @@ class VlcPlayer(BasePlayer):
                 self.drop(getMessage("vlc-failed-versioncheck"))
             else:
                 self._duration = float(value.replace(",", "."))
+                with self._estimatorLock:
+                    self._positionEstimator.set_duration_hint(self._duration)
             self._durationAsk.set()
             if name == "duration-change":
                 self._filechanged = True
@@ -314,31 +362,61 @@ class VlcPlayer(BasePlayer):
         elif name == "playstate":
             self._paused = bool(value != 'playing') if (value != "no-input" and self._filechanged == False) else self._client.getGlobalPaused()
             diff = time.time() - self._lastVLCPositionUpdate if self._lastVLCPositionUpdate else 0
+            rawFrozen = (
+                self._lastRawPosition is not None and
+                self._lastRawPosition == self._previousRawPosition and
+                self._previousRawPosition == self._previousPreviousRawPosition
+            )
             if (
                 self._paused == False and
-                self._position == self._previousPreviousPosition and
-                self._previousPosition == self._position and
+                rawFrozen and
                 self._duration and
                 self._duration > constants.PLAYLIST_LOAD_NEXT_FILE_MINIMUM_LENGTH and
-                (self._duration - self._position) < constants.VLC_EOF_DURATION_THRESHOLD and
+                (self._duration - self._lastRawPosition) < constants.VLC_EOF_DURATION_THRESHOLD and
                 diff > constants.VLC_LATENCY_ERROR_THRESHOLD
             ):
                 self._client.ui.showDebugMessage("Treating 'playing' response as 'paused' due to VLC EOF bug")
                 self.setPaused(True)
             self._pausedAsk.set()
         elif name == "position":
-            newPosition = float(value.replace(",", ".")) if (value != "no-input" and not self._filechanged) else self._client.getGlobalPosition()
-            if newPosition == self._previousPosition and newPosition != self._duration and self._paused is False:
-                self._client.ui.showDebugMessage(
-                    "Not considering position {} duplicate as new time because of VLC time precision bug".format(
-                        newPosition))
-                self._previousPreviousPosition = self._previousPosition
-                self._previousPosition = self._position
-                self._positionAsk.set()
-                return
+            isRawSample = value != "no-input" and not self._filechanged
+            if isRawSample:
+                newPosition = float(value.replace(",", "."))
+            else:
+                newPosition = self._client.getGlobalPosition()
+            if isRawSample:
+                now = time.time()
+                with self._estimatorLock:
+                    estimate = self._positionEstimator.observe(
+                        newPosition, now, paused=bool(self._paused))
+                    self._position = self._positionEstimator.reported_position_at(
+                        now, paused=bool(self._paused))
+                    if constants.DEBUG_MODE:
+                        self._client.ui.showDebugMessage(
+                            "VLCpos raw={} reported={} seek={} frozen={} rate={:.3f}".format(
+                                newPosition, self._position, estimate.is_seek,
+                                estimate.is_frozen, self._positionEstimator.rate()))
+                if self._pendingSeekTarget is not None and not estimate.is_seek:
+                    landingError = abs(newPosition - self._pendingSeekTarget)
+                    pendingFor = now - (self._pendingSeekIssuedAt or now)
+                    if landingError <= constants.VLC_SEEK_LANDING_TOLERANCE:
+                        self._pendingSeekTarget = None
+                        self._pendingSeekIssuedAt = None
+                        self._pendingSeekWarned = False
+                    elif pendingFor > constants.VLC_SEEK_LANDING_VERIFY_TIMEOUT and not self._pendingSeekWarned:
+                        self._client.ui.showDebugMessage(
+                            "VLC-seek-landing-miss target={} landed={} error={:.2f}".format(
+                                self._pendingSeekTarget, newPosition, landingError))
+                        self._pendingSeekWarned = True
+                        self._pendingSeekTarget = None
+                        self._pendingSeekIssuedAt = None
+                self._previousPreviousRawPosition = self._previousRawPosition
+                self._previousRawPosition = self._lastRawPosition
+                self._lastRawPosition = newPosition
+            else:
+                self._position = newPosition
             self._previousPreviousPosition = self._previousPosition
             self._previousPosition = self._position
-            self._position = newPosition
             if self._position < 0 and self._duration > 2147 and self._vlcVersion == "3.0.0":
                 self.drop(getMessage("vlc-failed-versioncheck"))
             self._lastVLCPositionUpdate = time.time()
