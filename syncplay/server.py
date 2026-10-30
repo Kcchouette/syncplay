@@ -142,6 +142,7 @@ class SyncFactory(Factory):
         roomSetByName = room.getSetBy().getName() if room.getSetBy() else None
         watcher.setPlaylist(roomSetByName, room.getPlaylist())
         watcher.setPlaylistIndex(roomSetByName, room.getPlaylistIndex())
+        room.notifySpeedCompatToJoiner(watcher)
         if RoomPasswordProvider.isControlledRoom(roomName):
             for controller in room.getControllers():
                 watcher.sendControlledRoomAuthStatus(True, controller, roomName)
@@ -552,6 +553,7 @@ class Room(object):
         self._lastSavedUpdate = 0
         self._position = 0
         self._speed = constants.DEFAULT_PLAYBACK_SPEED
+        self._speedCompatNotified = False
         self._permanent = False
 
     def __str__(self, *args, **kwargs):
@@ -613,11 +615,49 @@ class Room(object):
             return 0
 
     def setSpeed(self, speed, setBy=None):
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            return False
+        if speed < constants.MIN_PLAYBACK_SPEED or speed > constants.MAX_PLAYBACK_SPEED:
+            return False
+        if abs(speed - self._speed) <= constants.SPEED_TOLERANCE:
+            return False
         self._speed = speed
         self._setBy = setBy
+        self._maybeNotifySpeedCompat()
+        return True
 
     def getSpeed(self):
         return self._speed
+
+    def _hasWatchersWithoutSpeedSync(self):
+        return any(not w.supportsFeature("speedSync") for w in self._watchers.values())
+
+    def _maybeNotifySpeedCompat(self):
+        if abs(self._speed - constants.DEFAULT_PLAYBACK_SPEED) <= constants.SPEED_TOLERANCE:
+            self._speedCompatNotified = False
+            return
+        if self._speedCompatNotified or not self._hasWatchersWithoutSpeedSync():
+            return
+        messageDict = {
+            "message": getMessage("speed-compat-chat-notice").format(self._speed),
+            "username": None
+        }
+        for watcher in self._watchers.values():
+            watcher.sendChatMessage(messageDict, "speedSync")
+        self._speedCompatNotified = True
+
+    def notifySpeedCompatToJoiner(self, watcher):
+        if abs(self._speed - constants.DEFAULT_PLAYBACK_SPEED) <= constants.SPEED_TOLERANCE:
+            return
+        if watcher.supportsFeature("speedSync"):
+            return
+        messageDict = {
+            "message": getMessage("speed-compat-chat-notice").format(self._speed),
+            "username": None
+        }
+        watcher.sendChatMessage(messageDict, "speedSync")
 
     def setPaused(self, paused=STATE_PAUSED, setBy=None):
         self._playState = paused
@@ -704,7 +744,8 @@ class ControlledRoom(Room):
 
     def setSpeed(self, speed, setBy=None):
         if self.canControl(setBy):
-            Room.setSpeed(self, speed, setBy)
+            return Room.setSpeed(self, speed, setBy)
+        return False
 
     def addController(self, watcher):
         self._controllers[watcher.getName()] = watcher
@@ -732,6 +773,8 @@ class ControlledRoom(Room):
             self._playlistIndex = index
 
     def canControl(self, watcher):
+        if watcher is None:
+            return False
         return watcher.getName() in self._controllers
 
     def getControllers(self):
@@ -890,16 +933,16 @@ class Watcher(object):
 
     def updateState(self, position, paused, doSeek, messageAge, speed=None):
         pauseChanged = self.__hasPauseChanged(paused)
-        speedChanged = speed is not None and abs(speed - self._room.getSpeed()) > constants.SPEED_TOLERANCE
+        speedAccepted = False
+        if speed is not None and abs(speed - self._room.getSpeed()) > constants.SPEED_TOLERANCE:
+            speedAccepted = bool(self.getRoom().setSpeed(speed, self))
         self._lastUpdatedOn = time.time()
         if pauseChanged:
             self.getRoom().setPaused(Room.STATE_PAUSED if paused else Room.STATE_PLAYING, self)
-        if speedChanged:
-            self.getRoom().setSpeed(speed, self)
         if position is not None:
             position = self._updatePositionByAge(messageAge, paused, position)
             self.setPosition(position)
-        if doSeek or pauseChanged or speedChanged:
+        if doSeek or pauseChanged or speedAccepted:
             self._server.forcePositionUpdate(self, doSeek, paused)
 
     def isController(self):

@@ -41,6 +41,8 @@ en = {
     "revert-notification": "Reverting speed back to normal",
     "speed-change-notification": "{} changed playback speed to {}x",  # Username, Speed
     "current-speed-notification": "Current speed: {}x",
+    "speed-not-allowed-notification": "Only room operators can change playback speed in this room",
+    "speed-compat-chat-notice": "Room playback speed is {}x. Some clients in this room do not support synced speed and may drift out of sync.",
 
     "pause-notification": "{} paused at {}",  # User, Time
     "unpause-notification": "{} unpaused",  # User
