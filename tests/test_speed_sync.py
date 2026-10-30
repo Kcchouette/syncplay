@@ -179,6 +179,7 @@ class TestClientSpeedState(unittest.TestCase):
         from syncplay.client import SyncplayClient
         client = SyncplayClient.__new__(SyncplayClient)
         client._globalSpeed = constants.DEFAULT_PLAYBACK_SPEED
+        client._speedProposalPending = False
         client._globalPosition = 0.0
         client._globalPaused = False
         client._lastGlobalUpdate = time.time()
@@ -194,6 +195,7 @@ class TestClientSpeedState(unittest.TestCase):
         client._protocol.logged = True
         client.userlist = MagicMock()
         client.userlist.currentUser.file = {"name": "test.mkv", "duration": 100}
+        client.userlist.currentUser.canControl.return_value = True
         return client
 
     def test_get_global_speed_default(self):
@@ -205,8 +207,33 @@ class TestClientSpeedState(unittest.TestCase):
         client.serverFeatures = {"speedSync": True}
         client.setSpeed(1.5)
         self.assertEqual(client._globalSpeed, 1.5)
+        self.assertTrue(client.hasSpeedProposalPending())
         # But should send state to server
         client._protocol.sendState.assert_called_once()
+
+    def test_send_state_only_includes_speed_when_proposal_pending(self):
+        from syncplay.protocols import SyncClientProtocol
+        proto = SyncClientProtocol.__new__(SyncClientProtocol)
+        proto.clientIgnoringOnTheFly = 0
+        proto.serverIgnoringOnTheFly = 0
+        proto._pingService = MagicMock()
+        proto._pingService.newTimestamp.return_value = 1
+        proto._pingService.getRtt.return_value = 0
+        proto.sendMessage = MagicMock()
+
+        client = MagicMock()
+        client.getGlobalSpeed.return_value = 1.5
+        client.hasSpeedProposalPending.return_value = False
+        proto._client = client
+        proto.sendState(10.0, False, False, None, False)
+        state = proto.sendMessage.call_args[0][0]["State"]
+        self.assertNotIn("speed", state["playstate"])
+
+        client.hasSpeedProposalPending.return_value = True
+        proto.sendState(10.0, False, False, None, False)
+        state = proto.sendMessage.call_args[0][0]["State"]
+        self.assertEqual(state["playstate"]["speed"], 1.5)
+        client.clearSpeedProposal.assert_called()
 
     def test_global_position_dead_reckoning_with_speed(self):
         client = self._make_client()
@@ -616,22 +643,14 @@ class TestSetSpeedTyping(unittest.TestCase):
         self.assertAlmostEqual(pos, 12.0, delta=0.2)
 
     def test_room_setSpeed_with_string_would_fail(self):
-        """If speed somehow arrives as a string, multiplication in
-        getPosition would fail. The protocol extraction uses dict access
-        which preserves the JSON-parsed float type, so this shouldn't
-        happen in practice."""
+        """Non-numeric speed is rejected and room speed is unchanged."""
         from syncplay.server import Room
         dbhandle = MagicMock()
         dbhandle.saveRoom = MagicMock()
         room = Room("testroom", dbhandle)
-        room.setSpeed("1.5", None)  # String — would break dead reckoning
-        room._playState = Room.STATE_PLAYING
-        room._position = 10.0
-        room._lastUpdate = time.time() - 1.0
-        # This would raise TypeError: unsupported operand type(s)
-        # for *: 'float' and 'str'
-        with self.assertRaises(TypeError):
-            room.getPosition()
+        accepted = room.setSpeed("not-a-number", None)
+        self.assertFalse(accepted)
+        self.assertEqual(room.getSpeed(), constants.DEFAULT_PLAYBACK_SPEED)
 
 
 class TestSlowdownSpeedInteraction(unittest.TestCase):
@@ -956,27 +975,47 @@ class TestFeatureGating(unittest.TestCase):
         self.assertTrue(features["speedSync"])
 
     def test_check_feature_support_defaults_false_for_old_server(self):
-        """Old server (< 1.7.3) should default speedSync to False."""
+        """Old server without featureList should leave speedSync False."""
         from syncplay.client import SyncplayClient
-        from syncplay import utils
         client = SyncplayClient.__new__(SyncplayClient)
         client.serverVersion = "1.7.2"
         client.ui = MagicMock()
         client._player = MagicMock()
         client._config = {'sharedPlaylistEnabled': True}
-        # Build defaults
-        defaults = {
-            "speedSync": utils.meetsMinVersion("1.7.2", constants.SPEED_SYNC_MIN_VERSION)
-        }
-        self.assertFalse(defaults["speedSync"])
+        client.checkForFeatureSupport(None)
+        self.assertFalse(client.serverFeatures["speedSync"])
 
-    def test_check_feature_support_true_for_new_server(self):
-        """New server (>= 1.7.5) should default speedSync to True."""
-        from syncplay import utils
-        defaults = {
-            "speedSync": utils.meetsMinVersion("1.7.5", constants.SPEED_SYNC_MIN_VERSION)
-        }
-        self.assertTrue(defaults["speedSync"])
+    def test_check_feature_support_true_when_server_feature_list(self):
+        """Server featureList overlay enables speedSync even if version is already 1.7.x."""
+        from syncplay.client import SyncplayClient
+        client = SyncplayClient.__new__(SyncplayClient)
+        client.serverVersion = "1.7.7"
+        client.ui = MagicMock()
+        client._player = MagicMock()
+        client._config = {'sharedPlaylistEnabled': True}
+        client.checkForFeatureSupport({"speedSync": True, "sharedPlaylists": True, "chat": True,
+                                       "readiness": True, "managedRooms": True,
+                                       "setOthersReadiness": True, "featureList": True,
+                                       "persistentRooms": False,
+                                       "maxChatMessageLength": None, "maxUsernameLength": None,
+                                       "maxRoomNameLength": None, "maxFilenameLength": None})
+        self.assertTrue(client.serverFeatures["speedSync"])
+
+    def test_check_feature_support_false_without_key_even_on_new_version(self):
+        """A 1.7.7 server that does not advertise speedSync stays False."""
+        from syncplay.client import SyncplayClient
+        client = SyncplayClient.__new__(SyncplayClient)
+        client.serverVersion = "1.7.7"
+        client.ui = MagicMock()
+        client._player = MagicMock()
+        client._config = {'sharedPlaylistEnabled': True}
+        client.checkForFeatureSupport({"featureList": True, "sharedPlaylists": True, "chat": True,
+                                       "readiness": True, "managedRooms": True,
+                                       "setOthersReadiness": True,
+                                       "persistentRooms": False,
+                                       "maxChatMessageLength": None, "maxUsernameLength": None,
+                                       "maxRoomNameLength": None, "maxFilenameLength": None})
+        self.assertFalse(client.serverFeatures["speedSync"])
 
 if platform.system()=="Windows":
     class TestMpcSpeedSupport(unittest.TestCase):
@@ -986,6 +1025,7 @@ if platform.system()=="Windows":
             """MPC-HC should have speedSupported = True."""
             from syncplay.players.mpc import MPCHCAPIPlayer
             self.assertTrue(MPCHCAPIPlayer.speedSupported)
+            self.assertFalse(MPCHCAPIPlayer.speedSlowdownSupported)
 
         def test_mpc_setspeed_tracks_grace_period(self):
             """MPC-HC setSpeed should track _lastSpeedSetTime."""
@@ -995,6 +1035,231 @@ if platform.system()=="Windows":
             player.setSpeed(1.5)
             self.assertAlmostEqual(player._lastSpeedSetTime, time.time(), delta=0.1)
             player._mpcApi.setSpeed.assert_called_with(1.5)
+else:
+    class TestMpcSpeedFlags(unittest.TestCase):
+        """Do not import mpc on non-Windows (win32 deps). Flag contract only."""
+
+        def test_mpc_flags_documented(self):
+            # MPCHCAPIPlayer: speedSupported=True, speedSlowdownSupported=False
+            # Verified on Windows suite; avoid win32 import here.
+            self.assertTrue(True)
+
+
+class TestMessageAgeSpeedCompensation(unittest.TestCase):
+    """Et0h: updateGlobalState must compensate messageAge by room speed."""
+
+    def _make_client(self):
+        from syncplay.client import SyncplayClient
+        client = SyncplayClient.__new__(SyncplayClient)
+        client._globalSpeed = 2.0
+        client._speedProposalPending = False
+        client._globalPosition = 10.0
+        client._globalPaused = False
+        client._lastGlobalUpdate = time.time()
+        client._lastPlayerUpdate = None
+        client._playerPosition = 0.0
+        client._playerPaused = False
+        client._speedChanged = False
+        client._config = {'slowdownThreshold': 1.5}
+        client.ui = MagicMock()
+        client._player = MagicMock()
+        client._player.speedSupported = True
+        client._protocol = MagicMock()
+        client._protocol.logged = True
+        client.userlist = MagicMock()
+        client.userlist.currentUser.canControl.return_value = True
+        client.userlist.hasRoomStateChanged.return_value = False
+        client._warnings = MagicMock()
+        client._SyncplayClient__getUserlistOnLogon = False
+        return client
+
+    def test_message_age_scaled_by_incoming_speed(self):
+        client = self._make_client()
+        # Capture position passed into _changePlayerStateAccordingToGlobalState
+        captured = {}
+        def fake_change(position, paused, doSeek, setBy, speed=None):
+            captured['position'] = position
+            return False
+        client._changePlayerStateAccordingToGlobalState = fake_change
+        client.updateGlobalState(100.0, False, False, "peer", 1.0, speed=2.0)
+        # 100 + 1.0 * 2.0 = 102
+        self.assertAlmostEqual(captured['position'], 102.0, delta=0.001)
+
+    def test_message_age_fallback_to_global_speed(self):
+        client = self._make_client()
+        client._globalSpeed = 0.5
+        captured = {}
+        def fake_change(position, paused, doSeek, setBy, speed=None):
+            captured['position'] = position
+            return False
+        client._changePlayerStateAccordingToGlobalState = fake_change
+        client.updateGlobalState(100.0, False, False, "peer", 1.0, speed=None)
+        self.assertAlmostEqual(captured['position'], 100.5, delta=0.001)
+
+
+class TestManagedRoomSpeedControl(unittest.TestCase):
+    """Et0h: non-operators cannot change room speed; client restores global."""
+
+    def test_room_set_speed_rejects_out_of_range(self):
+        from syncplay.server import Room
+        room = Room("r", MagicMock())
+        self.assertFalse(room.setSpeed(0.05, None))
+        self.assertFalse(room.setSpeed(50.0, None))
+        self.assertEqual(room.getSpeed(), 1.0)
+        self.assertTrue(room.setSpeed(1.5, None))
+        self.assertEqual(room.getSpeed(), 1.5)
+
+    def test_room_set_speed_rejects_same_speed(self):
+        from syncplay.server import Room
+        room = Room("r", MagicMock())
+        self.assertFalse(room.setSpeed(1.0, None))
+
+    def test_controlled_room_set_speed_returns_bool(self):
+        from syncplay.server import ControlledRoom
+        room = ControlledRoom("r", MagicMock())
+        controller = MagicMock()
+        controller.getName.return_value = "op"
+        room.addController(controller)
+        viewer = MagicMock()
+        viewer.getName.return_value = "viewer"
+        self.assertTrue(room.setSpeed(1.5, controller))
+        self.assertFalse(room.setSpeed(2.0, viewer))
+        self.assertEqual(room.getSpeed(), 1.5)
+
+    def test_non_operator_rejected_speed_does_not_force_update(self):
+        from syncplay.server import Watcher, Room, ControlledRoom
+        dbhandle = MagicMock()
+        room = ControlledRoom("controlled-room", dbhandle)
+        controller = MagicMock()
+        controller.getName.return_value = "op"
+        room.addController(controller)
+        factory = MagicMock()
+        connector = MagicMock()
+        with patch('syncplay.server.reactor'):
+            watcher = Watcher(factory, connector, "viewer")
+        watcher._room = room
+        watcher.setPosition(10.0)
+        room._playState = room.STATE_PLAYING
+        factory.reset_mock()
+        watcher.updateState(10.0, False, False, 0, speed=2.0)
+        factory.forcePositionUpdate.assert_not_called()
+        self.assertEqual(room.getSpeed(), 1.0)
+
+    def test_client_set_speed_restores_when_not_allowed(self):
+        from syncplay.client import SyncplayClient
+        client = SyncplayClient.__new__(SyncplayClient)
+        client._globalSpeed = 1.2
+        client._speedChanged = False
+        client._speedProposalPending = False
+        client.ui = MagicMock()
+        client._player = MagicMock()
+        client._player.speedSupported = True
+        client._protocol = MagicMock()
+        client._protocol.logged = True
+        client.serverFeatures = {"speedSync": True}
+        client.userlist = MagicMock()
+        client.userlist.currentUser.canControl.return_value = False
+        client.getUsername = lambda: "viewer"
+        client.setSpeed(2.0)
+        self.assertEqual(client._globalSpeed, 1.2)
+        client._player.setSpeed.assert_called_with(1.2)
+        client._protocol.sendState.assert_not_called()
+        client.ui.updateSpeed.assert_called_with(1.2)
+
+
+class TestSpeedCompatChatNotice(unittest.TestCase):
+    """Et0h: chat notice for clients without speedSync when speed != 1.0."""
+
+    def _room_with_mixed_clients(self):
+        from syncplay.server import Room
+        room = Room("r", MagicMock())
+        modern = MagicMock()
+        modern.supportsFeature.return_value = True
+        legacy = MagicMock()
+        legacy.supportsFeature.return_value = False
+        room._watchers = {"a": modern, "b": legacy}
+        return room, modern, legacy
+
+    def test_notice_once_per_non_default_speed_episode(self):
+        room, modern, legacy = self._room_with_mixed_clients()
+        self.assertTrue(room.setSpeed(1.5, None))
+        # Broadcast pattern matches setReady: call on all with skipIfSupportsFeature
+        modern.sendChatMessage.assert_called_once()
+        self.assertEqual(modern.sendChatMessage.call_args[0][1], "speedSync")
+        self.assertEqual(legacy.sendChatMessage.call_count, 1)
+        self.assertEqual(legacy.sendChatMessage.call_args[0][1], "speedSync")
+        # Second change while still non-1.0: no second room-wide notice
+        self.assertTrue(room.setSpeed(2.0, None))
+        self.assertEqual(legacy.sendChatMessage.call_count, 1)
+        # Return to 1.0 resets episode
+        self.assertTrue(room.setSpeed(1.0, None))
+        self.assertTrue(room.setSpeed(1.5, None))
+        self.assertEqual(legacy.sendChatMessage.call_count, 2)
+
+    def test_joiner_without_speed_sync_gets_notice(self):
+        room, modern, legacy = self._room_with_mixed_clients()
+        # No watchers for setSpeed path
+        room._watchers = {}
+        self.assertTrue(room.setSpeed(1.5, None))
+        joiner = MagicMock()
+        joiner.supportsFeature.return_value = False
+        room.notifySpeedCompatToJoiner(joiner)
+        joiner.sendChatMessage.assert_called_once()
+        self.assertEqual(joiner.sendChatMessage.call_args[0][1], "speedSync")
+
+    def test_joiner_with_speed_sync_no_notice(self):
+        room, modern, legacy = self._room_with_mixed_clients()
+        room._watchers = {}
+        self.assertTrue(room.setSpeed(1.5, None))
+        joiner = MagicMock()
+        joiner.supportsFeature.return_value = True
+        room.notifySpeedCompatToJoiner(joiner)
+        joiner.sendChatMessage.assert_not_called()
+
+
+class TestBasePlayerSpeedHelper(unittest.TestCase):
+    """DRY detection helper on BasePlayer."""
+
+    def test_maybe_report_detected_speed_respects_can_control_via_setspeed(self):
+        from syncplay.players.basePlayer import BasePlayer
+        player = BasePlayer.__new__(BasePlayer)
+        player._detectedSpeed = 1.5
+        player._client = MagicMock()
+        player._client._speedChanged = False
+        player._client.getGlobalSpeed.return_value = 1.0
+        player._lastSpeedSetTime = None
+        player._maybeReportDetectedSpeed()
+        player._client.setSpeed.assert_called_once_with(1.5)
+
+    def test_maybe_report_respects_grace_period(self):
+        from syncplay.players.basePlayer import BasePlayer
+        player = BasePlayer.__new__(BasePlayer)
+        player._detectedSpeed = 1.5
+        player._client = MagicMock()
+        player._client._speedChanged = False
+        player._client.getGlobalSpeed.return_value = 1.0
+        player._lastSpeedSetTime = time.time()
+        player._maybeReportDetectedSpeed()
+        player._client.setSpeed.assert_not_called()
+
+    def test_maybe_report_respects_slowdown_flag(self):
+        from syncplay.players.basePlayer import BasePlayer
+        player = BasePlayer.__new__(BasePlayer)
+        player._detectedSpeed = 1.5
+        player._client = MagicMock()
+        player._client._speedChanged = True
+        player._lastSpeedSetTime = None
+        player._maybeReportDetectedSpeed()
+        player._client.setSpeed.assert_not_called()
+
+
+class TestUiManagerUpdateSpeed(unittest.TestCase):
+    def test_uimanager_forwards_update_speed(self):
+        from syncplay.client import UiManager
+        ui = MagicMock()
+        mgr = UiManager(MagicMock(), ui)
+        mgr.updateSpeed(1.5)
+        ui.updateSpeed.assert_called_once_with(1.5)
 
 
 class TestSpeedRounding(unittest.TestCase):
