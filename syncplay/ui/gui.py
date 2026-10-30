@@ -1206,7 +1206,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError:
             self.showErrorMessage(getMessage("invalid-speed-value"))
             return
-        if speed < 0.1 or speed > 10.0:
+        if speed < constants.MIN_PLAYBACK_SPEED or speed > constants.MAX_PLAYBACK_SPEED:
             self.showErrorMessage(getMessage("invalid-speed-value"))
             return
         self._syncplayClient.setSpeed(speed)

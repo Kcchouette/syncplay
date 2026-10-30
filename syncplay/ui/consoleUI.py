@@ -255,7 +255,7 @@ class ConsoleUI(threading.Thread):
             else:
                 try:
                     speed = round(float(parameter.strip()), 2)
-                    if speed < 0.1 or speed > 10.0:
+                    if speed < constants.MIN_PLAYBACK_SPEED or speed > constants.MAX_PLAYBACK_SPEED:
                         raise ValueError
                     self._syncplayClient.setSpeed(speed)
                 except ValueError:
