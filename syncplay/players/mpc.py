@@ -3,7 +3,6 @@ import os.path
 import re
 import time
 import threading
-import _thread
 from functools import wraps
 
 import win32con, win32api, win32gui, ctypes, ctypes.wintypes  #@UnresolvedImport @UnusedImport
@@ -27,9 +26,9 @@ class MpcHcApi:
         self.__playpause_warden = False
         self.__locks = self.__Locks()
         self.__mpcExistenceChecking = threading.Thread(target=self.__mpcReadyInSlaveMode, name="Check MPC window")
-        self.__mpcExistenceChecking.setDaemon(True)
+        self.__mpcExistenceChecking.daemon = True
         self.__listener = self.__Listener(self, self.__locks)
-        self.__listener.setDaemon(True)
+        self.__listener.daemon = True
         self.__listener.start()
         self.__locks.listenerStart.wait()
 
@@ -97,12 +96,17 @@ class MpcHcApi:
     def sendRawCommand(self, cmd, value):
         self.__listener.SendCommand(cmd, value)
 
+    def _dispatch(self, callback, *args):
+        """Fire-and-forget callback on a daemon thread (WM_COPYDATA handler
+        thread must never block on client/UI work)."""
+        threading.Thread(target=callback, args=args, daemon=True).start()
+
     def handleCommand(self, cmd, value):
         if cmd == self.CMD_CONNECT:
             self.__listener.mpcHandle = int(value)
             self.__locks.mpcStart.set()
             if self.callbacks.onConnected:
-                _thread.start_new_thread(self.callbacks.onConnected, ())
+                self._dispatch(self.callbacks.onConnected)
 
         elif cmd == self.CMD_STATE:
             self.loadState = int(value)
@@ -117,12 +121,12 @@ class MpcHcApi:
             else:
                 self.__locks.fileReady.set()
             if self.callbacks.onFileStateChange:
-                _thread.start_new_thread(self.callbacks.onFileStateChange, (self.loadState,))
+                self._dispatch(self.callbacks.onFileStateChange, self.loadState)
 
         elif cmd == self.CMD_PLAYMODE:
             self.playState = int(value)
             if self.callbacks.onUpdatePlaystate:
-                _thread.start_new_thread(self.callbacks.onUpdatePlaystate, (self.playState,))
+                self._dispatch(self.callbacks.onUpdatePlaystate, self.playState)
 
         elif cmd == self.CMD_NOWPLAYING:
             value = re.split(r'(?<!\\)\|', value)
@@ -132,31 +136,31 @@ class MpcHcApi:
             self.filePlaying = value[3].split('\\').pop()
             self.fileDuration = float(value[4])
             if self.callbacks.onUpdatePath:
-                _thread.start_new_thread(self.callbacks.onUpdatePath, (self.onUpdatePath,))
+                self._dispatch(self.callbacks.onUpdatePath, self.onUpdatePath)
             if self.callbacks.onUpdateFilename:
-                _thread.start_new_thread(self.callbacks.onUpdateFilename, (self.filePlaying,))
+                self._dispatch(self.callbacks.onUpdateFilename, self.filePlaying)
             if self.callbacks.onUpdateFileDuration:
-                _thread.start_new_thread(self.callbacks.onUpdateFileDuration, (self.fileDuration,))
+                self._dispatch(self.callbacks.onUpdateFileDuration, self.fileDuration)
 
         elif cmd == self.CMD_CURRENTPOSITION:
             self.lastFilePosition = float(value)
             if self.callbacks.onGetCurrentPosition:
-                _thread.start_new_thread(self.callbacks.onGetCurrentPosition, (self.lastFilePosition,))
+                self._dispatch(self.callbacks.onGetCurrentPosition, self.lastFilePosition)
 
         elif cmd == self.CMD_NOTIFYSEEK:
             if self.lastFilePosition != float(value):  # Notify seek is sometimes sent twice
                 self.lastFilePosition = float(value)
                 if self.callbacks.onSeek:
-                    _thread.start_new_thread(self.callbacks.onSeek, (self.lastFilePosition,))
+                    self._dispatch(self.callbacks.onSeek, self.lastFilePosition)
 
         elif cmd == self.CMD_DISCONNECT:
             if self.callbacks.onMpcClosed:
-                _thread.start_new_thread(self.callbacks.onMpcClosed, (None,))
+                self._dispatch(self.callbacks.onMpcClosed, None)
 
         elif cmd == self.CMD_VERSION:
             if self.callbacks.onVersion:
                 self.version = value
-                _thread.start_new_thread(self.callbacks.onVersion, (value,))
+                self._dispatch(self.callbacks.onVersion, value)
 
     class PlayerNotReadyException(Exception):
         pass
@@ -205,11 +209,9 @@ class MpcHcApi:
     CMD_ADDTOPLAYLIST = 0xA0001000
     CMD_CLEARPLAYLIST = 0xA0001001
     CMD_STARTPLAYLIST = 0xA0001002
-    CMD_REMOVEFROMPLAYLIST = 0xA0001003  # TODO
     CMD_SETPOSITION = 0xA0002000
     CMD_SETAUDIODELAY = 0xA0002001
     CMD_SETSUBTITLEDELAY = 0xA0002002
-    CMD_SETINDEXPLAYLIST = 0xA0002003  # DOESNT WORK
     CMD_SETAUDIOTRACK = 0xA0002004
     CMD_SETSUBTITLETRACK = 0xA0002005
     CMD_GETSUBTITLETRACKS = 0xA0003000
