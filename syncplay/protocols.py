@@ -309,9 +309,11 @@ class SyncClientProtocol(JSONCommandProtocol):
             state["playstate"]["paused"] = paused
             if doSeek:
                 state["playstate"]["doSeek"] = doSeek
-            speed = self._client.getGlobalSpeed()
-            if speed is not None:
-                state["playstate"]["speed"] = speed
+            if self._client.hasSpeedProposalPending():
+                speed = self._client.getGlobalSpeed()
+                if speed is not None:
+                    state["playstate"]["speed"] = speed
+                self._client.clearSpeedProposal()
         state["ping"] = {}
         if latencyCalculation:
             state["ping"]["latencyCalculation"] = latencyCalculation

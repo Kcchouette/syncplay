@@ -146,6 +146,7 @@ class SyncplayClient(object):
         self._globalPosition = 0.0
         self._globalPaused = 0.0
         self._globalSpeed = constants.DEFAULT_PLAYBACK_SPEED
+        self._speedProposalPending = False
         self._userOffset = 0.0
         self._speedChanged = False
         self.behindFirstDetected = None
@@ -461,11 +462,13 @@ class SyncplayClient(object):
         self._lastGlobalUpdate = time.time()
         if speed is not None and abs(speed - self._globalSpeed) > constants.SPEED_TOLERANCE:
             self._globalSpeed = speed
+            self._speedProposalPending = False
             if self._player.speedSupported and not self._speedChanged:
                 self._player.setSpeed(speed)
             madeChangeOnPlayer = True
             hideFromOSD = not constants.SHOW_SAME_ROOM_OSD
             self.ui.showMessage(getMessage("speed-change-notification").format(setBy, speed), hideFromOSD)
+            self.ui.updateSpeed(speed)
         if doSeek:
             madeChangeOnPlayer = self._serverSeeked(position, setBy)
         if diff > self._config['rewindThreshold'] and not doSeek and not self._config['rewindOnDesync'] == False:
@@ -482,7 +485,13 @@ class SyncplayClient(object):
                         self.behindFirstDetected = time.time() + constants.FASTFORWARD_RESET_THRESHOLD
             else:
                 self.behindFirstDetected = None
-        if self._player.speedSupported and not doSeek and not paused and  not self._config['slowOnDesync'] == False:
+        if (
+            self._player.speedSupported
+            and getattr(self._player, 'speedSlowdownSupported', True)
+            and not doSeek
+            and not paused
+            and not self._config['slowOnDesync'] == False
+        ):
             madeChangeOnPlayer = self._slowDownToCoverTimeDifference(diff, setBy)
         if paused == False and pauseChanged:
             madeChangeOnPlayer = self._serverUnpaused(setBy)
@@ -501,7 +510,8 @@ class SyncplayClient(object):
             self.getUserList()
         madeChangeOnPlayer = False
         if not paused:
-            position += messageAge
+            effectiveSpeed = speed if speed is not None else self._globalSpeed
+            position += messageAge * effectiveSpeed
         if self._player:
             madeChangeOnPlayer = self._changePlayerStateAccordingToGlobalState(position, paused, doSeek, setBy, speed)
         if madeChangeOnPlayer:
@@ -565,14 +575,34 @@ class SyncplayClient(object):
     def getGlobalSpeed(self):
         return self._globalSpeed
 
+    def hasSpeedProposalPending(self):
+        return self._speedProposalPending
+
+    def clearSpeedProposal(self):
+        self._speedProposalPending = False
+
     def setSpeed(self, speed):
+        if self._player is None:
+            self.ui.showDebugMessage("Tried to set speed before player was ready")
+            return
+        if not self.userlist.currentUser.canControl():
+            self.ui.showMessage(getMessage("speed-not-allowed-notification"), True)
+            if self._player.speedSupported:
+                self._player.setSpeed(self._globalSpeed)
+            self.ui.updateSpeed(self._globalSpeed)
+            self._speedProposalPending = False
+            return
+        self._speedChanged = False
         self._globalSpeed = speed
-        self._player.setSpeed(speed)
+        if self._player.speedSupported:
+            self._player.setSpeed(speed)
         hideFromOSD = not constants.SHOW_SAME_ROOM_OSD
         self.ui.showMessage(getMessage("speed-change-notification").format(self.getUsername(), speed), hideFromOSD)
+        self.ui.updateSpeed(speed)
         if self._protocol and self._protocol.logged:
             if not self.serverFeatures.get("speedSync"):
                 return
+            self._speedProposalPending = True
             self._protocol.sendState(self.getPlayerPosition(), self.getPlayerPaused(), False, None, True)
 
     def eofReportedByPlayer(self):
@@ -735,7 +765,7 @@ class SyncplayClient(object):
             "maxRoomNameLength": constants.FALLBACK_MAX_ROOM_NAME_LENGTH,
             "maxFilenameLength": constants.FALLBACK_MAX_FILENAME_LENGTH,
             "setOthersReadiness": utils.meetsMinVersion(self.serverVersion, constants.SET_OTHERS_READINESS_MIN_VERSION),
-            "speedSync": utils.meetsMinVersion(self.serverVersion, constants.SPEED_SYNC_MIN_VERSION)
+            "speedSync": False
         }
         if featureList:
             self.serverFeatures.update(featureList)
@@ -743,7 +773,7 @@ class SyncplayClient(object):
             self.ui.showErrorMessage(getMessage("shared-playlists-not-supported-by-server-error").format(constants.SHARED_PLAYLIST_MIN_VERSION, self.serverVersion))
         elif not self.serverFeatures["sharedPlaylists"]:
             self.ui.showErrorMessage(getMessage("shared-playlists-disabled-by-server-error"))
-        if not self.serverFeatures["speedSync"]:
+        if not self.serverFeatures.get("speedSync"):
             self.ui.showDebugMessage(getMessage("speed-sync-not-supported-by-server-error").format(constants.SPEED_SYNC_MIN_VERSION, self.serverVersion))
         # TODO: Have messages for all unsupported & disabled features
         if self.serverFeatures["maxChatMessageLength"] is not None:
@@ -1798,6 +1828,10 @@ class UiManager(object):
 
     def updateAutoPlayState(self, newState):
         self.__ui.updateAutoPlayState(newState)
+
+    def updateSpeed(self, speed):
+        if hasattr(self.__ui, 'updateSpeed'):
+            self.__ui.updateSpeed(speed)
 
     def showUserList(self, currentUser, rooms):
         self.__ui.showUserList(currentUser, rooms)
