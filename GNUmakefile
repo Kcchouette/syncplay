@@ -102,3 +102,7 @@ uninstall-server: u-server u-common
 install: common client server warnings
 
 uninstall: u-client u-server u-common
+
+# Pure-logic unit tests (no media players, no GUI, no network).
+test:
+	PYTHONPATH=. python3 -m unittest discover -s tests -v
