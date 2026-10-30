@@ -92,11 +92,7 @@ class MplayerPlayer(BasePlayer):
         self._getSpeed()
         self._positionAsk.wait()
         self._pausedAsk.wait()
-        if self._detectedSpeed is not None and not self._client._speedChanged:
-            detectedSpeed = round(self._detectedSpeed, 2)
-            gracePeriodActive = time.time() - getattr(self, '_lastSpeedSetTime', 0) < constants.SPEED_SET_GRACE_PERIOD
-            if not gracePeriodActive and abs(detectedSpeed - self._client.getGlobalSpeed()) > constants.SPEED_TOLERANCE:
-                self._client.setSpeed(detectedSpeed)
+        self._maybeReportDetectedSpeed()
         self._client.updatePlayerStatus(self._paused, self._position)
 
     def _setProperty(self, property_, value):

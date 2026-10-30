@@ -1,7 +1,25 @@
 from syncplay import constants
+import time
 
 
 class BasePlayer(object):
+
+    speedSupported = False
+    speedSlowdownSupported = True
+
+    def _maybeReportDetectedSpeed(self):
+        if self._detectedSpeed is None or self._client._speedChanged:
+            return
+        detectedSpeed = round(self._detectedSpeed, 2)
+        lastSpeedSetTime = getattr(self, '_lastSpeedSetTime', None)
+        gracePeriodActive = (
+            lastSpeedSetTime is not None
+            and time.time() - lastSpeedSetTime < constants.SPEED_SET_GRACE_PERIOD
+        )
+        if gracePeriodActive:
+            return
+        if abs(detectedSpeed - self._client.getGlobalSpeed()) > constants.SPEED_TOLERANCE:
+            self._client.setSpeed(detectedSpeed)
 
     '''
     This method is supposed to

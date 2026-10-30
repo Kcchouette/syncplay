@@ -193,11 +193,7 @@ class VlcPlayer(BasePlayer):
         self._listener.sendLine(".")
         if self._filename and not self._filechanged:
             self._positionAsk.wait(constants.PLAYER_ASK_DELAY)
-            if self._detectedSpeed is not None and not self._client._speedChanged:
-                detectedSpeed = round(self._detectedSpeed, 2)
-                gracePeriodActive = time.time() - getattr(self, '_lastSpeedSetTime', 0) < constants.SPEED_SET_GRACE_PERIOD
-                if not gracePeriodActive and abs(detectedSpeed - self._client.getGlobalSpeed()) > constants.SPEED_TOLERANCE:
-                    self._client.setSpeed(detectedSpeed)
+            self._maybeReportDetectedSpeed()
             self._client.updatePlayerStatus(self._paused, self.getCalculatedPosition())
         else:
             self._client.updatePlayerStatus(self._client.getGlobalPaused(), self._client.getGlobalPosition())

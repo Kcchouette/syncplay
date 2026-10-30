@@ -314,6 +314,7 @@ class MpcHcApi:
 
 class MPCHCAPIPlayer(BasePlayer):
     speedSupported = True
+    speedSlowdownSupported = False
     alertOSDSupported = False
     customOpenDialog = False
     chatOSDSupported = False
