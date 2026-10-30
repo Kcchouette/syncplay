@@ -5,6 +5,7 @@ from datetime import datetime
 from functools import wraps
 
 from twisted import version as twistedVersion
+from twisted.internet import error as twisted_error
 from twisted.internet.interfaces import IHandshakeListener
 from twisted.protocols.basic import LineReceiver
 from twisted.python.versions import Version
@@ -13,7 +14,7 @@ from zope.interface.declarations import implementer
 import syncplay
 from syncplay.constants import PING_MOVING_AVERAGE_WEIGHT, CONTROLLED_ROOMS_MIN_VERSION, USER_READY_MIN_VERSION, SHARED_PLAYLIST_MIN_VERSION, CHAT_MIN_VERSION, UNKNOWN_UI_MODE
 from syncplay.messages import getMessage
-from syncplay.utils import meetsMinVersion
+from syncplay.utils import hardenTransport, meetsMinVersion
 
 
 class JSONCommandProtocol(LineReceiver):
@@ -87,6 +88,7 @@ class SyncClientProtocol(JSONCommandProtocol):
         self._client.ui.showDebugMessage(line)
 
     def connectionMade(self):
+        hardenTransport(self.transport)
         self.hadFirstPlaylistIndex = False
         self.hadFirstStateUpdate = False
         self._client.initProtocol(self)
@@ -102,27 +104,56 @@ class SyncClientProtocol(JSONCommandProtocol):
             self.sendHello()
 
     def connectionLost(self, reason):
+        wasLogged = self.logged
+        wasRunning = self._client._running
         try:
-            if "Invalid DNS-ID" in str(reason.value):
-                self._client._serverSupportsTLS = False
-            elif "tlsv1 alert protocol version" in str(reason.value):
-                self._client._clientSupportsTLS = False
-            elif "certificate verify failed" in str(reason.value):
-                self.dropWithError(getMessage("startTLS-server-certificate-invalid"))
-            elif "mismatched_id=DNS_ID" in str(reason.value):
-                self.dropWithError(getMessage("startTLS-server-certificate-invalid-DNS-ID"))
-            elif reason:
-                try:
-                    self._client.ui.showErrorMessage(str(type(reason)))
-                    self._client.ui.showErrorMessage(str(reason))
-                    if reason.stack:
-                        self._client.ui.showErrorMessage(str(reason.stack))
-                    self._client.ui.showErrorMessage(str(reason.value))
-                except:
-                    pass
-        except:
-            pass
+            self._classifyConnectionLoss(reason)
+        except Exception as e:
+            self.showDebugMessage("connectionLost handler error: {}".format(e))
         self._client.destroyProtocol()
+        # Pause on unexpected session loss only: intentional stop() clears
+        # _running first, and manualReconnect sets reconnecting before it
+        # tears the connection down.
+        if wasLogged and wasRunning and not self._client.reconnecting:
+            self._client.onDisconnect()
+
+    def _classifyConnectionLoss(self, reason):
+        value = getattr(reason, "value", reason)
+        reasonStr = str(value)
+
+        # TLS negotiation failures — kept as string matches (OpenSSL messages,
+        # not clean exception types).
+        if "Invalid DNS-ID" in reasonStr:
+            self._client._serverSupportsTLS = False
+            return
+        if "tlsv1 alert protocol version" in reasonStr:
+            self._client._clientSupportsTLS = False
+            return
+        if "certificate verify failed" in reasonStr:
+            self.dropWithError(getMessage("startTLS-server-certificate-invalid"))
+            return
+        if "mismatched_id=DNS_ID" in reasonStr:
+            self.dropWithError(getMessage("startTLS-server-certificate-invalid-DNS-ID"))
+            return
+
+        # Clean shutdown — debug only, no UI error dump.
+        if isinstance(value, twisted_error.ConnectionDone):
+            self.showDebugMessage("Connection closed cleanly")
+            return
+
+        # Expected network outcomes (unclean loss, abort, timeout) — one debug
+        # line instead of dumping the raw Failure to the user.
+        if isinstance(value, (twisted_error.ConnectionLost,
+                              twisted_error.TimeoutError,
+                              twisted_error.ConnectError)):
+            self.showDebugMessage("Connection lost: {}".format(type(value).__name__))
+            return
+
+        # Unexpected exception — one short UI line, full detail in debug.
+        self.showDebugMessage("Unexpected disconnect: {}".format(reasonStr))
+        if hasattr(reason, "getTraceback"):
+            self.showDebugMessage(reason.getTraceback())
+        self._client.ui.showErrorMessage(reasonStr)
 
     def dropWithError(self, error):
         self._client.ui.showErrorMessage(error)
@@ -491,7 +522,18 @@ class SyncServerProtocol(JSONCommandProtocol):
         self.sendError(error)
         self.drop()
 
+    def connectionMade(self):
+        hardenTransport(self.transport)
+
     def connectionLost(self, reason):
+        value = getattr(reason, "value", None)
+        # ConnectionDone = clean FIN; ConnectionLost = unclean — both normal for
+        # this protocol, so stay silent. Unexpected exceptions get one line
+        # (the server has no UI; print matches dropWithError).
+        if value is not None and not isinstance(
+            value, (twisted_error.ConnectionDone, twisted_error.ConnectionLost)
+        ):
+            print("Client disconnected: {}".format(value))
         self._factory.removeWatcher(self._watcher)
 
     def getFeatures(self):

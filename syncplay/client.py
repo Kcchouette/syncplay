@@ -12,7 +12,7 @@ from copy import deepcopy
 from functools import wraps
 from urllib.parse import urlparse
 
-from twisted.application.internet import ClientService
+from twisted.application.internet import ClientService, backoffPolicy
 from twisted.internet.endpoints import HostnameEndpoint
 from twisted.internet.protocol import ClientFactory
 from twisted.internet import reactor, task, defer, threads
@@ -45,18 +45,24 @@ from syncplay.protocols import SyncClientProtocol
 from syncplay.watched import WatchedManager
 from syncplay.utils import isMacOS
 class SyncClientFactory(ClientFactory):
-    def __init__(self, client, retry=constants.RECONNECT_RETRIES):
+    def __init__(self, client):
         self._client = client
-        self.retry = retry
-        self._timesTried = 0
 
     def buildProtocol(self, addr):
-        self._timesTried = 0
         return SyncClientProtocol(self._client)
 
     def stopRetrying(self):
         self._client._reconnectingService.stopService()
         self._client.ui.showErrorMessage(getMessage("disconnection-notification"))
+
+
+# attempt counts from ClientService are 1-based, so the first delay is
+# initialDelay * factor (≈1s), then 2s, 4s … capped at maxDelay + 0-1s jitter.
+_retryBackoff = backoffPolicy(
+    initialDelay=constants.RECONNECT_INITIAL_DELAY,
+    maxDelay=constants.RECONNECT_MAX_DELAY,
+    factor=2.0,
+)
 
 
 class SyncplayClient(object):
@@ -136,6 +142,7 @@ class SyncplayClient(object):
         self._config = config
 
         self._running = False
+        self.reconnecting = False
         self._askPlayerTimer = None
 
         self._lastPlayerUpdate = None
@@ -178,8 +185,11 @@ class SyncplayClient(object):
         self._lastGlobalUpdate = time.time()
 
     def destroyProtocol(self):
-        if self._protocol:
-            self._protocol.drop()
+        """Detach the current protocol without touching the transport.
+
+        connectionLost implies the transport is already gone; stop() must call
+        protocol.drop() itself when an active close is wanted.
+        """
         self._protocol = None
 
     def initPlayer(self, player):
@@ -827,6 +837,7 @@ class SyncplayClient(object):
         return sharedPlaylistEnabled
 
     def connected(self):
+        self.reconnecting = False
         self.lastConnectTime = time.time()
         readyState = self._config['readyAtStart'] if self.userlist.currentUser.isReady() is None else self.userlist.currentUser.isReady()
         self._protocol.setReady(readyState, manuallyInitiated=False)
@@ -913,17 +924,17 @@ class SyncplayClient(object):
             self._clientSupportsTLS = False
 
         def retry(retries):
-            # Use shared state reset method
-            self._performRetryStateReset()
-            if retries == 0:
-                self.onDisconnect()
+            # ClientService increments failedAttempts before calling this, so
+            # the first retry has retries == 1 (never 0).
+            self._performRetryStateReset(announce=(retries == 1))
             if retries > constants.RECONNECT_RETRIES:
                 reactor.callLater(0.1, self.ui.showErrorMessage, getMessage("connection-failed-notification"),
                                   True)
                 reactor.callLater(0.1, self.stop, True)
-                return None
+                # Never return None: ClientService would callLater(None).
+                return constants.RECONNECT_MAX_DELAY
 
-            return(0.1 * (2 ** min(retries, 5)))
+            return _retryBackoff(retries)
 
         self._reconnectingService = ClientService(self._endpoint, self.protocolFactory, retryPolicy=retry)
         try:
@@ -950,6 +961,8 @@ class SyncplayClient(object):
         if not self._running:
             return
         self._running = False
+        if self._protocol:
+            self._protocol.drop()
         self.destroyProtocol()
         if self._player:
             self._player.drop()
@@ -961,7 +974,7 @@ class SyncplayClient(object):
         if promptForAction:
             self.ui.promptFor(getMessage("enter-to-exit-prompt"))
 
-    def _performRetryStateReset(self):
+    def _performRetryStateReset(self, announce=True):
         """
         Shared method to reset connection state for both automatic and manual retries.
         This contains the common logic from the original retry function.
@@ -969,7 +982,8 @@ class SyncplayClient(object):
         self._lastGlobalUpdate = None
         self.ui.setSSLMode(False)
         self.playlistMayNeedRestoring = True
-        self.ui.showMessage(getMessage("reconnection-attempt-notification"))
+        if announce:
+            self.ui.showMessage(getMessage("reconnection-attempt-notification"))
         self.reconnecting = True
 
     def manualReconnect(self):

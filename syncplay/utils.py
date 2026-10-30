@@ -627,3 +627,42 @@ class RandomStringGenerator(object):
 
 class NotControlledRoom(Exception):
     pass
+
+
+def hardenTransport(transport):
+    """Best-effort socket hardening: TCP keepalive (+intervals) and TCP_NODELAY.
+
+    Never raises: a socket option failure must not fail the connection.
+    """
+    try:
+        if hasattr(transport, "setTcpKeepAlive"):
+            transport.setTcpKeepAlive(True)
+    except Exception:
+        pass
+    try:
+        if hasattr(transport, "setTcpNoDelay"):
+            transport.setTcpNoDelay(True)
+    except Exception:
+        pass
+    _setTcpKeepAliveIntervals(transport)
+
+
+def _setTcpKeepAliveIntervals(transport):
+    """Platform-specific keepalive intervals. Best-effort only."""
+    import socket
+    sock = getattr(transport, "socket", None)
+    if sock is None:
+        return
+    try:
+        if sys.platform.startswith("linux") and hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 6)
+        elif sys.platform == "darwin" and hasattr(socket, "TCP_KEEPALIVE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30)
+        # Windows: SO_KEEPALIVE only (set by setTcpKeepAlive above). Portable
+        # interval control would need SIO_KEEPALIVE_VALS via ctypes — out of scope.
+    except Exception:
+        pass
