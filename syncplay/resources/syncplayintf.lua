@@ -999,6 +999,26 @@ for b = (' '):byte(), ('~'):byte() do
     bindings[#bindings + 1] = {binding, function() handle_char_input(c) end}
 end
 
+-- Keypad keys have dedicated mpv key names (KP0..KP9, KP_DIVIDE, ...)
+-- and are not covered by the ASCII loop above. Without these bindings they
+-- are swallowed by the force-mode repl-input section while chat is open.
+-- Digit names are KP0 (no underscore); operators use KP_* (verified via
+-- `mpv --input-keylist`).
+local numpad_char_map = {
+    { 'KP0', '0' }, { 'KP1', '1' }, { 'KP2', '2' }, { 'KP3', '3' },
+    { 'KP4', '4' }, { 'KP5', '5' }, { 'KP6', '6' }, { 'KP7', '7' },
+    { 'KP8', '8' }, { 'KP9', '9' },
+    { 'KP_DIVIDE', '/' },
+    { 'KP_MULTIPLY', '*' },
+    { 'KP_SUBTRACT', '-' },
+    { 'KP_ADD', '+' },
+    { 'KP_DEC', '.' },
+}
+for _, pair in ipairs(numpad_char_map) do
+    local key, c = pair[1], pair[2]
+    bindings[#bindings + 1] = { key, function() handle_char_input(c) end }
+end
+
 function add_alpharowbinding(firstchar,lastchar)
     for b = (firstchar):byte(), (lastchar):byte() do
         local c = string.char(b)
