@@ -235,6 +235,8 @@ class EventCallbackTests(unittest.TestCase):
         kwargs = thread_cls.call_args[1]
         self.assertEqual(kwargs["target"], self.player._resolveFileLoadFields)
         self.assertTrue(kwargs.get("daemon"))
+        self.assertEqual(kwargs.get("args"),
+                         (self.player._cache.current_load_generation(),))
 
     def test_unknown_event_is_ignored(self):
         self.pipe.trigger_event("playback-restart")
@@ -256,7 +258,7 @@ class FileLoadResolutionTests(unittest.TestCase):
             ("get_property", "pause"): True,
             ("get_property", "time-pos"): 3.5,
         }
-        player._resolveFileLoadFields()
+        player._resolveFileLoadFields(player._cache.current_load_generation())
         queried = player._listener.mpvpipe.commands
         # filename/duration/path came from observers — not re-queried …
         self.assertNotIn(("get_property", "filename"), queried)
@@ -275,7 +277,7 @@ class FileLoadResolutionTests(unittest.TestCase):
         player._cache.on_property("filename", "ep1.mkv")
         player._cache.on_property("path", "file:///ep1.mkv")
         player._listener.mpvpipe.command_results = {("get_property", "duration"): 55.0}
-        player._resolveFileLoadFields()
+        player._resolveFileLoadFields(player._cache.current_load_generation())
         self.assertEqual(player._cache.snapshot().duration, 55.0)
         self.assertIn(("get_property", "duration"), player._listener.mpvpipe.commands)
 
@@ -284,9 +286,32 @@ class FileLoadResolutionTests(unittest.TestCase):
         player._cache.on_property("filename", "stream.m3u8")
         player._cache.on_property("path", "https://example/stream.m3u8")
         # no command_results → get_property returns None (property unavailable)
-        player._resolveFileLoadFields()
+        player._resolveFileLoadFields(player._cache.current_load_generation())
         self.assertEqual(player._client.file_updates,
                          [("stream.m3u8", 0.0, "https://example/stream.m3u8")])
+
+    def test_stale_generation_worker_aborts_without_writes(self):
+        # Playlist advance mid-resolve: the worker of the previous load must
+        # not pollute the next file's cache or finalize it.
+        player = make_player(file_loaded=False)
+        stale_generation = player._cache.current_load_generation()
+        player._cache.clear_file()  # a newer load started
+        player._listener.setReadyToSend(False)
+        player._listener.mpvpipe.command_results = {
+            ("get_property", "pause"): True,
+            ("get_property", "time-pos"): 9.9,
+            ("get_property", "filename"): "next.mkv",
+            ("get_property", "duration"): 1.0,
+            ("get_property", "path"): "/tmp/next.mkv",
+        }
+        player._resolveFileLoadFields(stale_generation)
+        snap = player._cache.snapshot()
+        self.assertIsNone(snap.filename)
+        self.assertIsNone(snap.duration)
+        self.assertIsNone(snap.path)
+        self.assertEqual(player._client.file_updates, [])
+        self.assertFalse(player._listener.readyToSend)
+        self.assertNotIn(["set_property", "pause", "no"], player._listener.sent)
 
     def test_load_resync_prevents_pause_unpause_deadlock(self):
         # Regression: pre-load the gated cache stored the client's initial
@@ -302,7 +327,7 @@ class FileLoadResolutionTests(unittest.TestCase):
             ("get_property", "pause"): True,
             ("get_property", "time-pos"): 0.0,
         }
-        player._resolveFileLoadFields()
+        player._resolveFileLoadFields(player._cache.current_load_generation())
         # _onFileUpdate's reconcile saw resynced True vs global False and
         # actually sent the unpause (with a poisoned 0.0 the guard swallowed
         # it and mpv never started).
@@ -470,9 +495,15 @@ class ClientMessageRoutingTests(unittest.TestCase):
         self._fire("syncplay-chat")
         self.assertEqual(self.player._listener.chats, [])
 
-    def test_script_ready_triggers_options_send(self):
+    def test_script_ready_triggers_options_send_via_reactor_hop(self):
         self._fire("syncplay-intf-ready")
         self.assertTrue(self._sends_options())
+        # The handshake must hop off the EventHandler thread: _sendMpvOptions
+        # issues synchronous mpvpipe.command() calls that would
+        # head-of-line-block every other callback for up to 120 s.
+        hopped = [fn for fn, _args in self.player.reactor.calls
+                  if fn == self.player._sendMpvOptions]
+        self.assertEqual(len(hopped), 1)
 
     def test_unknown_message_prefix_ignored(self):
         self._fire("something-else", "x")

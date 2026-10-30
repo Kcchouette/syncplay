@@ -188,8 +188,12 @@ class MpvPlayer(BasePlayer):
             self._listener.sendChat(args[1])
         elif args[0] == "syncplay-intf-ready":
             # Beats the setFeatures race when the script loads after launch
-            # (IINA's load-script).
-            self._sendMpvOptions()
+            # (IINA's load-script). Hopped onto the reactor: _sendMpvOptions
+            # issues synchronous mpvpipe.command() calls, which must never
+            # run on the EventHandler thread (single-threaded; a hung
+            # command would head-of-line-block chat/EOF/property callbacks
+            # for up to the vendor's 120 s timeout).
+            self.reactor.callFromThread(self._sendMpvOptions)
 
     def _onMpvProperty(self, name, data):
         """Runs on the vendor lib's EventHandler thread.
@@ -222,10 +226,11 @@ class MpvPlayer(BasePlayer):
             elif signal is Signal.FILE_LOAD_DONE:
                 threading.Thread(
                     target=self._resolveFileLoadFields,
+                    args=(self._cache.current_load_generation(),),
                     name="MPV FileLoad", daemon=True,
                 ).start()
 
-    def _resolveFileLoadFields(self):
+    def _resolveFileLoadFields(self, generation):
         """Worker thread: fill fields the property observers may have raced.
 
         Bounded per-field waits keep a hung mpv from stalling the adapter for
@@ -237,22 +242,34 @@ class MpvPlayer(BasePlayer):
         initial ``pause=yes``) would otherwise be lost to the pre-load gate
         and never refresh — which both desynced pause and starved the
         position stamp.
+
+        ``generation`` guards against a newer load starting mid-resolve
+        (playlist advance / double-click): every write and the finalize hop
+        are skipped if the cache generation moved on, so this file's values
+        can never pollute the next file's state.
         """
+
+        def still_current():
+            return self._cache.current_load_generation() == generation
+
         snap = self._cache.snapshot()
         cached = {"filename": snap.filename, "duration": snap.duration, "path": snap.path}
         for prop in ("filename", "duration", "path"):
             if cached[prop] is None:
                 value = self._queryProperty(prop, timeout=2.0)
-                if value is not None:
+                if value is not None and still_current():
                     self._cache.on_property(prop, value)
+        if not still_current():
+            return
         pause_value = self._queryProperty("pause", timeout=2.0)
-        if pause_value is not None:
+        if pause_value is not None and still_current():
             # Direct read of mpv reality — bypasses the file-loaded gate.
             self._cache.force_pause(bool(pause_value))
         position_value = self._queryProperty("time-pos", timeout=2.0)
-        if position_value is not None:
+        if position_value is not None and still_current():
             self._cache.force_position(float(position_value), stamp=True)
-        self.reactor.callFromThread(self._finalizeFileLoad)
+        if still_current():
+            self.reactor.callFromThread(self._finalizeFileLoad)
 
     def _queryProperty(self, name, timeout=2.0):
         pipe = self._listener.mpvpipe

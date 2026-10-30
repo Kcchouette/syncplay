@@ -37,10 +37,12 @@ OBSERVED_PROPERTIES = (
     "eof-reached",
 )
 
-# mpv event names consumed by the adapter (bind_event).
+# mpv event names consumed by the adapter (bind_event). Clean/abnormal
+# exits are NOT handled here: the mpv `quit` event carries no reason, so
+# the adapter keeps the log-based `Exiting... (reason)` parse and the
+# socket-death quit_callback instead.
 EVENT_START_FILE = "start-file"
 EVENT_FILE_LOADED = "file-loaded"
-EVENT_QUIT = "quit"
 
 
 class Signal(Enum):
@@ -48,7 +50,6 @@ class Signal(Enum):
     FILE_LOAD_START = auto()
     FILE_LOAD_DONE = auto()
     EOF = auto()
-    QUIT = auto()
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,10 @@ class MpvStatusCache:
         # forever after the first file.
         self._saw_pause = False
         self._saw_time_pos = False
+        # Bumped by every clear_file() (a new load started). File-load
+        # workers capture the generation at FILE_LOAD_DONE and abort if it
+        # changed, so a slow resolve cannot pollute the next file's state.
+        self._load_generation = 0
 
     # ------------------------------------------------------------------ write
 
@@ -139,8 +144,6 @@ class MpvStatusCache:
             return [Signal.FILE_LOAD_START]
         if event == EVENT_FILE_LOADED:
             return [Signal.FILE_LOAD_DONE]
-        if event == EVENT_QUIT:
-            return [Signal.QUIT]
         return []
 
     def _store_position(self, value: float, recently_reset: bool, global_position: float) -> None:
@@ -187,6 +190,12 @@ class MpvStatusCache:
             self._eof_reached = False
             self._file_loaded = False
             self._last_loaded_time = None
+            self._load_generation += 1
+
+    def current_load_generation(self) -> int:
+        """Monotonic id of the current file load (see clear_file)."""
+        with self._lock:
+            return self._load_generation
 
     def record_position(self, value: float, recently_reset: bool,
                         global_position: float) -> None:

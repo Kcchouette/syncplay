@@ -99,11 +99,15 @@ class SignalTests(unittest.TestCase):
     def test_file_loaded_signals_done(self):
         self.assertEqual(self.cache.on_event("file-loaded"), [Signal.FILE_LOAD_DONE])
 
-    def test_quit_signals(self):
-        self.assertEqual(self.cache.on_event("quit"), [Signal.QUIT])
-
     def test_unknown_event_no_signal(self):
         self.assertEqual(self.cache.on_event("playback-restart"), [])
+
+    def test_clear_file_bumps_load_generation(self):
+        generation = self.cache.current_load_generation()
+        self.cache.clear_file()
+        self.assertEqual(self.cache.current_load_generation(), generation + 1)
+        self.cache.on_event("start-file")  # also routes through clear_file
+        self.assertEqual(self.cache.current_load_generation(), generation + 2)
 
     def test_eof_rising_edge_signals_once(self):
         self.assertEqual(self.cache.on_property("eof-reached", False), [])
