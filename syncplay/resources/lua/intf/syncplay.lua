@@ -549,7 +549,7 @@ function set_playstate(argument)
 end
 
 if string.sub(vlcversion,1,2) == "1." or string.sub(vlcversion,1,3) == "2.0" or string.sub(vlcversion,1,3) == "2.1" or string.sub(vlcversion,1,5) == "2.2.0" then
-    vlc.msg.err("This version of VLC does not support Syncplay. Please use VLC 2.2.1+ or an alternative media player.")
+    vlc.msg.err("This version of VLC does not support Syncplay. Please use VLC 3.0.0+ or an alternative media player.")
     quit_vlc()
 else
     l = vlc.net.listen_tcp(host, port)
@@ -602,7 +602,7 @@ while running == true do
         end
 
         if (running == false) then
-            net.close(fd)
+            vlc.net.close(fd)
         end
 
         -- handle write mode

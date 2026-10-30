@@ -42,6 +42,13 @@ When a new person joins they will also be synchronised. Syncplay also includes t
 
 Syncplay is not a file sharing service.
 
+## Player support
+
+Syncplay synchronises **mpv** (and the mpv-based mpv.net, Memento and IINA), **VLC 3.x**, **MPC-HC**, **MPC-BE** and **mplayer2**.
+
+* **mpv** is the recommended player: it is the most precisely synchronised and the best maintained integration.
+* **VLC 4 is not supported** — its Lua interface changed in ways incompatible with Syncplay's VLC integration; use VLC 3.x or an alternative such as mpv. (mplayer2 support is deprecated and may be removed in a future major version.)
+
 ## License
 
 This project, the Syncplay released binaries, and all the files included in this repository unless stated otherwise in the header of the file, are licensed under the [Apache License, version 2.0](https://www.apache.org/licenses/LICENSE-2.0.html). A copy of this license is included in the LICENSE file of this repository. Licenses and attribution notices for third-party media are set out in [third-party-notices.txt](syncplay/resources/third-party-notices.txt).

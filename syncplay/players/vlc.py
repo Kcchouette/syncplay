@@ -1,7 +1,17 @@
 
+"""VLC 3.x adapter.
+
+Supported: VLC 3.x only. VLC 4 is NOT supported — its Lua interface changed
+the APIs this adapter depends on; syncplay.lua deliberately quits under
+major > 3 (resources/lua/intf/syncplay.lua) and Syncplay tells users to use
+VLC 3 or an alternative such as mpv (messages: vlc-failed-connection).
+"""
+
+import hashlib
 import os
 import random
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -113,14 +123,15 @@ class VlcPlayer(BasePlayer):
     osdMessageSeparator = "; "
 
     RE_ANSWER = re.compile(constants.VLC_ANSWER_REGEX)
-    SLAVE_ARGS = constants.VLC_SLAVE_ARGS
-    SLAVE_ARGS.extend(constants.VLC_SLAVE_EXTRA_ARGS)
-    vlcport = random.randrange(constants.VLC_MIN_PORT, constants.VLC_MAX_PORT) if (constants.VLC_MIN_PORT < constants.VLC_MAX_PORT) else constants.VLC_MIN_PORT
 
     def __init__(self, client, playerPath, filePath, args):
         from twisted.internet import reactor
         self.reactor = reactor
         self._client = client
+        # Per-instance port: a class-level port would be shared by every
+        # instance/restart within the process. Must be set before the
+        # listener runs — both the Lua --lua-config and connectTCP read it.
+        self.vlcport = random.randrange(constants.VLC_MIN_PORT, constants.VLC_MAX_PORT) if (constants.VLC_MIN_PORT < constants.VLC_MAX_PORT) else constants.VLC_MIN_PORT
         self._paused = None
         self._duration = None
         self._filename = None
@@ -213,7 +224,7 @@ class VlcPlayer(BasePlayer):
 
     def displayMessage(
         self, message,
-        duration=constants.OSD_DURATION * 1000, OSDType=constants.OSD_DURATION, mood=constants.MESSAGE_NEUTRAL
+        duration=constants.OSD_DURATION * 1000, OSDType=constants.OSD_NOTIFICATION, mood=constants.MESSAGE_NEUTRAL
     ):
         duration /= 1000
         if OSDType != constants.OSD_ALERT:
@@ -237,7 +248,8 @@ class VlcPlayer(BasePlayer):
             self._lastVLCPositionUpdate = time.time()
         self._listener.sendLine('set-playstate: {}'.format("paused" if value else "playing"))
 
-    def getMRL(self, fileURL):
+    @staticmethod
+    def getMRL(fileURL):
         if utils.isURL(fileURL):
             fileURL = urllib.parse.quote(fileURL, safe="%/:=&?~#+!$,;'@()*")
             return fileURL
@@ -251,6 +263,54 @@ class VlcPlayer(BasePlayer):
             fileURL = "file://" + fileURL
         fileURL = fileURL.replace("+", "%20")
         return fileURL
+
+    @staticmethod
+    def buildVlcCall(playerPath, filePath, vlcModulePath, vlcport, userArgs=None):
+        """Pure argv builder for a VLC launch — no shared-state mutation.
+
+        Each call assembles a fresh slave-args list, so the --lua-config
+        entry (which embeds the per-instance port) can never accumulate
+        across launches the way the old class-level SLAVE_ARGS.extend did.
+        """
+        call = [playerPath]
+        if filePath:
+            if utils.isASCII(filePath):
+                call.append(filePath)
+            else:
+                call.append(VlcPlayer.getMRL(filePath))
+        slaveArgs = [*constants.VLC_SLAVE_ARGS, *constants.VLC_SLAVE_EXTRA_ARGS]
+        slaveArgs.append(
+            '--lua-config=syncplay={{modulepath=\"{}\",port=\"{}\"}}'.format(vlcModulePath, str(vlcport)))
+        call.extend(slaveArgs)
+        if userArgs:
+            for arg in userArgs:
+                if "=" in arg and "\"" in arg:
+                    (argName, argValue) = arg.split("=", 1)
+                    if argValue.startswith("\"") and argValue.endswith("\""):
+                        arg = argName + "=" + argValue[1:-1]
+                call.extend([arg])
+        return call
+
+    @staticmethod
+    def _ensureVlcInterface(src, dst):
+        """Install the Lua interface into the user's VLC directory.
+
+        Skips the copy when dst already matches src (still re-applying the
+        executable bit). Any hashing failure or content mismatch falls back
+        to a full copy; copy errors propagate to the caller.
+        """
+        unchanged = False
+        try:
+            with open(src, 'rb') as f:
+                srcHash = hashlib.sha256(f.read()).digest()
+            with open(dst, 'rb') as f:
+                unchanged = hashlib.sha256(f.read()).digest() == srcHash
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            shutil.copyfile(src, dst)
+        os.chmod(dst, 0o755)
+        return True
 
     def openFile(self, filePath, resetPosition=False):
         if not utils.isURL(filePath):
@@ -281,7 +341,7 @@ class VlcPlayer(BasePlayer):
         if line == "filepath-change-notification":
             self._filechanged = True
             t = threading.Thread(target=self._onFileUpdate)
-            t.setDaemon(True)
+            t.daemon = True
             t.start()
         elif name == "filepath":
             self._filechanged = True
@@ -309,7 +369,7 @@ class VlcPlayer(BasePlayer):
             if name == "duration-change":
                 self._filechanged = True
                 t = threading.Thread(target=self._onFileUpdate)
-                t.setDaemon(True)
+                t.daemon = True
                 t.start()
         elif name == "playstate":
             self._paused = bool(value != 'playing') if (value != "no-input" and self._filechanged == False) else self._client.getGlobalPaused()
@@ -349,8 +409,21 @@ class VlcPlayer(BasePlayer):
             self._filenameAsk.set()
         elif line.startswith("vlc-version: "):
             self._vlcVersion = line.split(': ')[1].replace(' ', '-').split('-')[0]
-            if not utils.meetsMinVersion(self._vlcVersion, constants.VLC_MIN_VERSION):
-                self._client.ui.showErrorMessage(getMessage("vlc-version-mismatch").format(constants.VLC_MIN_VERSION))
+            # Floor from VLC_MIN_VERSION plus an explicit VLC 3-only ceiling:
+            # the Lua interface quits under major > 3, this is defence in
+            # depth if a future Lua guard ever regresses.
+            try:
+                versionMajor = int(self._vlcVersion.split('.')[0])
+            except ValueError:
+                versionMajor = 0
+            if not utils.meetsMinVersion(self._vlcVersion, constants.VLC_MIN_VERSION) or versionMajor > 3:
+                # vlc-version-mismatch does not exist as a message key (the
+                # old code raised KeyError here); vlc-failed-versioncheck is
+                # the translated "not supported" string.
+                self._client.ui.showErrorMessage(getMessage("vlc-failed-versioncheck"))
+                self._vlcready.set()
+                self.drop()
+                return
             self._vlcready.set()
 
     @staticmethod
@@ -427,12 +500,6 @@ class VlcPlayer(BasePlayer):
             self.oldIntfVersion = None
             self.timeVLCLaunched = None
 
-            call = [playerPath]
-            if filePath:
-                if utils.isASCII(filePath):
-                    call.append(filePath)
-                else:
-                    call.append(self.__playerController.getMRL(filePath))
             if isLinux():
                 if 'snap' in playerPath:
                     self.__playerController.vlcIntfPath = '/snap/vlc/current/usr/lib/vlc/lua/intf/'
@@ -468,31 +535,20 @@ class VlcPlayer(BasePlayer):
                 _createIntfFolder(self.__playerController.vlcIntfUserPath)
                 copyForm = utils.findResourcePath("syncplay.lua")
                 copyTo = os.path.join(self.__playerController.vlcIntfUserPath, "syncplay.lua")
-                self.__playerController._client.ui.showDebugMessage("Copying VLC Lua Interface from '{}' to '{}'".format(copyForm, copyTo))
-                import shutil
-                if os.path.exists(copyTo):
-                    os.chmod(copyTo, 0o755)
-                shutil.copyfile(copyForm, copyTo)
-                os.chmod(copyTo, 0o755)
+                self.__playerController._client.ui.showDebugMessage("Ensuring VLC Lua Interface at '{}' from '{}'".format(copyTo, copyForm))
+                self.__playerController._ensureVlcInterface(copyForm, copyTo)
             except Exception as e:
+                # Log and continue: a missing interface surfaces later as a
+                # connection failure instead of a half-built listener.
                 self.__playerController._client.ui.showErrorMessage(e)
-                return
             if isLinux():
                 self.__playerController.vlcDataPath = "/usr/lib/syncplay/resources"
             else:
                 self.__playerController.vlcDataPath = utils.findWorkingDir() + "\\resources"
-            self.__playerController.SLAVE_ARGS.append(
-                '--lua-config=syncplay={{modulepath=\"{}\",port=\"{}\"}}'.format(
-                    self.__playerController.vlcModulePath, str(self.__playerController.vlcport)))
 
-            call.extend(self.__playerController.SLAVE_ARGS)
-            if args:
-                for arg in args:
-                    if "=" in arg and "\"" in arg:
-                        (argName, argValue) = arg.split("=", 1)
-                        if argValue.startswith("\"") and argValue.endswith("\""):
-                            arg = argName + "=" + argValue[1:-1]
-                    call.extend([arg])
+            call = self.__playerController.buildVlcCall(
+                playerPath, filePath, self.__playerController.vlcModulePath,
+                self.__playerController.vlcport, args)
 
             self._vlcVersion = None
             if isWindows() and getattr(sys, 'frozen', '') and getattr(sys, '_MEIPASS', '') is not None:  # Needed for pyinstaller --onefile bundle
@@ -524,7 +580,7 @@ class VlcPlayer(BasePlayer):
                 self.__process.stderr = None
             else:
                 vlcoutputthread = threading.Thread(target=self.handle_vlcoutput, args=())
-                vlcoutputthread.setDaemon(True)
+                vlcoutputthread.daemon = True
                 vlcoutputthread.start()
             self.__playerController._vlcready.clear()
             self._factory = VLCClientFactory(self.__playerController, self.vlcHasResponded, self.timeVLCLaunched, self.__process)
